@@ -53,6 +53,7 @@ from kiro_crew.platform_compat import (
 )
 from kiro_crew.security import (
     DENIED_ROOT_PARTS,
+    StreamRedactor,
     get_credential_patterns,
     is_sensitive_path,
     path_contains_sensitive,
@@ -279,6 +280,10 @@ _HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _LSOF_TIMEOUT = 4
 _PROBE_TIMEOUT = 1.5
 _START_TIMEOUT = 45
+_DEV_LOG_TAIL_CHARS = 800
+# Fixed streaming read size: memory stays bounded while the whole log passes
+# through the redactor, so a credential anchor above the retained tail is seen.
+_DEV_LOG_READ_CHUNK = 64 * 1024
 _STOP_GRACE = 3
 _RELAY_TIMEOUT = 30
 _WS_IDLE = 3600
@@ -683,6 +688,28 @@ class _DevProxyHandler(dev_preview.DevProxyHandlerBase):
     timeout = _CLIENT_READ_TIMEOUT
 
 
+def _read_dev_log_tail(log: Path) -> str:
+    """Return the bounded, redacted diagnostic tail of a failed dev-server launch.
+
+    The log is streamed through the redactor in fixed-size chunks so a
+    credential is scrubbed even when its opening anchor (e.g. a PEM
+    ``-----BEGIN ... PRIVATE KEY-----`` header) sits far above the retained
+    tail: only the redactor's emitted output is accumulated, and only the last
+    ``_DEV_LOG_TAIL_CHARS`` characters of it are kept, so memory stays bounded.
+    """
+
+    redactor = StreamRedactor(_redact_text)
+    tail = ""
+    try:
+        with log.open("r", encoding="utf-8", errors="replace") as handle:
+            while chunk := handle.read(_DEV_LOG_READ_CHUNK):
+                tail = (tail + redactor.feed(chunk))[-_DEV_LOG_TAIL_CHARS:]
+            tail = (tail + redactor.flush())[-_DEV_LOG_TAIL_CHARS:]
+    except OSError:
+        return ""
+    return tail
+
+
 def _start_dev_proc(project_id: str, root: Path) -> dict:
     """Start an owned project dev server and discover the port it selected."""
 
@@ -763,11 +790,7 @@ def _start_dev_proc(project_id: str, root: Path) -> dict:
     deadline = time.time() + _START_TIMEOUT
     while time.time() < deadline:
         if proc.poll() is not None:
-            tail = ""
-            try:
-                tail = log.read_text("utf-8", errors="replace")[-800:]
-            except OSError:
-                pass
+            tail = _read_dev_log_tail(log)
             _DEV_PROCS.pop(project_id, None)
             return {
                 "ok": False,

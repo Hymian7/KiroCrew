@@ -437,6 +437,96 @@ class TestStartDevProc:
         assert result["ok"] is False
         assert "exited" in result["error"]
 
+    def test_process_exit_reads_only_a_bounded_log_tail(self, tmp_path, monkeypatch):
+        """A noisy child cannot force the error path to keep its whole log."""
+        _make_pkg_json(tmp_path, {"dev": "vite"})
+        (tmp_path / "node_modules").mkdir()
+        monkeypatch.setattr(server, "_resolve_bin", lambda n: Path("/usr/bin/npm"))
+        monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+        payload = "noise-" * 1_000 + "界" * 900 + "END"
+        fake = FakePopen(pid=201, returncode=1)
+
+        def fake_popen(*args, **kwargs):
+            handle = kwargs["stdout"]
+            handle.write(payload.encode("utf-8"))
+            handle.flush()
+            return fake
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        result = server._start_dev_proc("proj-tail", tmp_path)
+
+        assert result["ok"] is False
+        assert len(result["log"]) <= server._DEV_LOG_TAIL_CHARS
+        assert result["log"] == payload[-server._DEV_LOG_TAIL_CHARS :]
+
+    def test_process_exit_redacts_credentials_from_the_log_tail(
+        self, tmp_path, monkeypatch
+    ):
+        """A credential a dying dev server printed must not reach the returned tail."""
+        _make_pkg_json(tmp_path, {"dev": "vite"})
+        (tmp_path / "node_modules").mkdir()
+        monkeypatch.setattr(server, "_resolve_bin", lambda n: Path("/usr/bin/npm"))
+        monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        payload = f"config error near key {secret} while starting"
+        fake = FakePopen(pid=202, returncode=1)
+
+        def fake_popen(*args, **kwargs):
+            handle = kwargs["stdout"]
+            handle.write(payload.encode("utf-8"))
+            handle.flush()
+            return fake
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        result = server._start_dev_proc("proj-secret", tmp_path)
+
+        assert result["ok"] is False
+        assert secret not in result["log"]
+
+    def test_process_exit_redacts_a_key_whose_header_precedes_the_tail(
+        self, tmp_path, monkeypatch
+    ):
+        """A PEM key body reaches the tail while its BEGIN header sits far above it.
+
+        The read is bounded, so a byte-window over just the end would omit the
+        header and leave the body unredacted. Streaming the whole log through
+        the redactor keeps the PEM state, so the body is scrubbed regardless.
+        """
+        _make_pkg_json(tmp_path, {"dev": "vite"})
+        (tmp_path / "node_modules").mkdir()
+        monkeypatch.setattr(server, "_resolve_bin", lambda n: Path("/usr/bin/npm"))
+        monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+        key_body = "FAKEKEYMATERIALLINE/abcdefghijklmnop0123456789+/ABCD"
+        # Header, then enough noise that the char tail cannot reach back to it,
+        # then the key body near the very end.
+        payload = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            + "noise-" * 1_000
+            + f"\n{key_body}\n-----END RSA PRIVATE KEY-----\n"
+        )
+        fake = FakePopen(pid=203, returncode=1)
+
+        def fake_popen(*args, **kwargs):
+            handle = kwargs["stdout"]
+            handle.write(payload.encode("utf-8"))
+            handle.flush()
+            return fake
+
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+        result = server._start_dev_proc("proj-pem", tmp_path)
+
+        assert result["ok"] is False
+        # Premise guard: the header is far enough above the tail that a
+        # window-over-the-end read would have missed it.
+        assert len(payload) - payload.index("BEGIN") > server._DEV_LOG_TAIL_CHARS
+        assert key_body not in result["log"]
+
     def test_spawn_oserror(self, tmp_path, monkeypatch):
         """Popen failure (e.g. ENOENT) returns an error dict, not an exception."""
         _make_pkg_json(tmp_path, {"dev": "vite"})
