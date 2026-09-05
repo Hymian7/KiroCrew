@@ -995,8 +995,25 @@ def apply_import_zip(zip_path: Path, mode: str = "merge") -> dict:
 
             if (snap / "notifications.jsonl").is_file():
                 if (mc / "notifications.jsonl").is_file():
-                    _merge_notifications(snap / "notifications.jsonl", mc / "notifications.jsonl")
-                    summary["items"].append("notifications (merged)")
+                    # A platform that cannot pin raises
+                    # NotificationCopyUnsupported from inside the merge, exactly
+                    # as the copy branch does below -- record it as skipped and
+                    # let the import proceed. A link/FIFO/hardlink refusal on a
+                    # capable platform raises OSError and aborts instead, because
+                    # that is a bad or hostile source.
+                    try:
+                        _merge_notifications(
+                            snap / "notifications.jsonl", mc / "notifications.jsonl"
+                        )
+                        summary["items"].append("notifications (merged)")
+                    except NotificationCopyUnsupported as exc:
+                        # Zero records imported: flag it machine-readably so the
+                        # handler logs the import as partial, not a flat ok --
+                        # exactly as the crons refusal above does. A flat ok would
+                        # tell the API caller the import succeeded over records
+                        # left behind, the failure class this whole change removes.
+                        summary["items"].append(f"notifications (SKIPPED: {exc})")
+                        summary.setdefault("refused_merges", []).append("notifications")
                 else:
                     # Not `copy2`: it installed records the live file's own reader
                     # refuses, and that reader loses the whole file to one of them.
@@ -1014,6 +1031,7 @@ def apply_import_zip(zip_path: Path, mode: str = "merge") -> dict:
                         summary["items"].append("notifications (copied)")
                     except NotificationCopyUnsupported as exc:
                         summary["items"].append(f"notifications (SKIPPED: {exc})")
+                        summary.setdefault("refused_merges", []).append("notifications")
 
             for dirname in ("workspace", "plan_memory"):
                 sd = snap / dirname

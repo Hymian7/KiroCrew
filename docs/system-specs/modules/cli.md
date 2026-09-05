@@ -315,6 +315,28 @@ work, not introduced by it.
 A refusal to stage is a permission decision and is written to the SEL audit log —
 `snapshot_rejected` or `state_restore_rejected`, both with `reason=unpinnable_staging`.
 
+The restore's notification merge (`_merge_notifications`) resolves each name **once**:
+where the platform can pin, source and destination are each opened through
+`pinned_fs.open_in_pinned_parent` (the parent chain walked with `O_NOFOLLOW` from a
+caller-resolved root, so an ancestor swap is refused too), the descriptor is judged with
+`fstat` (`S_ISREG`) plus `pinned_fs.refuse_hardlink_alias` — a hardlinked alias is a
+regular file that no link screen can see, only the inode's link count — and the
+validation pass and the copy loop read that same held descriptor — the source rewound
+with `seek(0)`, the destination one `O_RDWR|O_APPEND` handle for both its scan and the
+append. Validating a name and then re-opening it are two resolutions of the same string,
+and the staging tree is agent-writable, so a swap between them used to append the link
+target's bytes into the live `notifications.jsonl` under a validation that had vouched
+for a different file. `O_NONBLOCK` is load-bearing, not hygiene: without it a name that
+became a FIFO blocks the open forever, converting a refused restore into a hung one.
+Where the platform has no `O_NOFOLLOW` (no atomic no-reparse open for the
+`O_RDWR|O_APPEND` destination handle), the merge raises `NotificationCopyUnsupported` —
+the same type `_install_notifications` raises there — which both merge call sites catch
+and degrade to a loud SKIP of that one component, exactly as the copy branch does, rather
+than aborting the whole restore. A by-name reparse check followed by a by-name open is a
+check-to-open window, and `fstat`/`S_ISREG` does not close it because a reparse point to a
+regular file passes it; a link, FIFO or hardlink refusal on a *capable* platform still
+raises `OSError` and aborts, because that is a hostile or corrupt source.
+
 The dashboard's import path (`portability.apply_import_zip`) is the **exception**, and
 deliberately: it has no flag and no consent surface, so refusing there would not mean
 "ask the user", it would mean deleting import on that platform. It therefore proceeds with

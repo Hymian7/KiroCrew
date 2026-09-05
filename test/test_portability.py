@@ -1344,6 +1344,40 @@ class TestImportMerge:
             assert "O_NOFOLLOW" in notif[0], notif[0]
             assert not (target / "notifications.jsonl").exists()
             assert len(items) > 1, f"the whole import stopped on a platform refusal: {items}"
+            # Flagged machine-readably so the handler logs the import as
+            # partial, not a flat ok, over records that were not installed.
+            assert "notifications" in (summary.get("refused_merges") or []), summary
+        finally:
+            os.unlink(str(zip_path))
+
+    def test_import_merge_branch_platform_skip_is_recorded_as_refused(
+        self, patched_config_dir, tmp_path, monkeypatch
+    ):
+        """The MERGE branch (a live file exists) also records the platform skip.
+
+        With a live ``notifications.jsonl`` already at the target the import takes
+        the merge branch, and on a platform without ``O_NOFOLLOW`` the merge
+        raises ``NotificationCopyUnsupported``. That must degrade to a skip that
+        is flagged in ``refused_merges`` -- not a silent ``ok`` over an import
+        that merged zero records -- and must leave the live file untouched.
+        """
+        zip_path = self._make_export(patched_config_dir)
+        try:
+            target = tmp_path / "target_mc"
+            target.mkdir()
+            live = target / "notifications.jsonl"
+            live.write_text(json.dumps({"ts": "1700000000", "title": "existing"}) + "\n")
+            before = live.read_bytes()
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+            with patch("kiro_crew.portability.config_dir", return_value=target):
+                with patch.dict(os.environ, {"KIROCREW_HOME": str(target)}):
+                    summary = apply_import_zip(zip_path, mode="merge")
+
+            notif = [i for i in summary["items"] if i.startswith("notifications")]
+            assert notif and "SKIPPED" in notif[0], summary["items"]
+            assert "notifications" in (summary.get("refused_merges") or []), summary
+            assert live.read_bytes() == before, "a refused merge changed the live file"
         finally:
             os.unlink(str(zip_path))
 

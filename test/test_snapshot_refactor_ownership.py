@@ -143,6 +143,7 @@ OWNERS: dict[str, tuple[str, ...]] = {
         "_merge_named_stores",
         "_merge_notifications",
         "_notification_key",
+        "_open_notification_file",
         "_report_unmerged_databases",
         "_serialise_with_notification_writes",
         "_usable_cron_shape",

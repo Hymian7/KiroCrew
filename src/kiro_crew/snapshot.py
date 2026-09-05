@@ -142,6 +142,7 @@ from kiro_crew.snapshot_merge import (  # noqa: F401 - facade re-exports
     _merge_named_stores,
     _merge_notifications,
     _notification_key,
+    _open_notification_file,
     _report_unmerged_databases,
     _serialise_with_notification_writes,
     _usable_cron_shape,
@@ -1397,9 +1398,20 @@ def _do_merge(
 
     if _want(components, "notifications"):
         sn, dn = snap / "notifications.jsonl", mc / "notifications.jsonl"
+        notifications_ok = True
         if sn.is_file():
             if dn.is_file():
-                _merge_notifications(sn, dn)
+                # A platform that cannot pin raises NotificationCopyUnsupported
+                # from inside the merge, exactly as the copy branch does below --
+                # skip that one component loudly and let the rest proceed. A
+                # link/FIFO/hardlink refusal on a capable platform is a different
+                # class: it raises OSError and aborts, because that is a bad or
+                # hostile source, not a platform that cannot do the work.
+                try:
+                    _merge_notifications(sn, dn)
+                except NotificationCopyUnsupported as exc:
+                    print(f"  ⚠️  Notifications: SKIPPED -- {exc}")
+                    notifications_ok = False
             else:
                 # Not `copy2`: a byte-exact copy installs records the live file's
                 # own reader refuses, and that reader loses the whole file to one
@@ -1414,7 +1426,11 @@ def _do_merge(
                     print("  Notifications: copied")
                 except NotificationCopyUnsupported as exc:
                     print(f"  ⚠️  Notifications: SKIPPED -- {exc}")
-        print("  ✅ notifications")
+                    notifications_ok = False
+        # A skipped component must never report a success tick, exactly as the
+        # crons branch gates its own tick on `crons_ok` above.
+        if notifications_ok:
+            print("  ✅ notifications")
 
     if _want(components, "security"):
         for f in CORE_FILES["security"]:
