@@ -1,16 +1,15 @@
 """Read-volume counters on ``VectorMemoryStore`` — the read-volume observable.
 
-The semantic-side searches re-read every row per call. The
-stand-down on that issue found the defect real and HTTP-reachable but
-UNASSERTABLE from outside the process: a SELECT moves neither ``data_version``
-nor the WAL, the observability endpoint reported context sizes rather than rows
-scanned, and wall-clock timing is not admissible evidence. These tests pin the
-structural signal that closes that gap, so a live pod can assert the read
-volume of a query path instead of inferring it from a stopwatch.
+A semantic query builds a resident scoring set once per (generation,
+data_version) state and reuses it across identical calls, so the read volume of
+a query path is HTTP-observable rather than inferable only from a stopwatch: a
+SELECT moves neither ``data_version`` nor the WAL, and wall-clock timing is not
+admissible evidence. These tests pin the structural signal — the population
+scan is credited once per state change and a warm repeat adds none.
 
-They do NOT assert the defect is fixed. ``test_a_second_identical_semantic_search_
-scans_the_population_again`` deliberately pins today's re-read as VISIBLE; when
-the fix lands, that test is the one that flips, which is the point of having it.
+``test_a_second_identical_semantic_search_reuses_the_resident_population`` is the
+ratchet that asserts that reuse, so a regression that reintroduces a per-call
+scan flips it.
 
 No embedder is wired here (``embed_fn`` stays None), so the semantic path scores
 keyword-only and the episodic path takes its stdlib rung — both still perform the
@@ -58,14 +57,16 @@ class TestCounterContract:
         store.get_semantic_context(query_text="tea")
         first = store.read_counters()
         assert first["semantic_full_scans"] == 1
+        # The second identical query with no write in between reuses the
+        # resident scoring rows, so it adds no population scan.
         store.get_semantic_context(query_text="tea")
-        assert store.read_counters()["semantic_full_scans"] == 2
+        assert store.read_counters()["semantic_full_scans"] == 1
         # A second store over the SAME file counts only its own reads, which is
         # what makes a two-process comparison meaningful rather than shared.
         other = opened(VectorMemoryStore(db_path=tmp_path / "mem.db"))
         other.init()
         assert other.read_counters()["semantic_full_scans"] == 0
-        assert store.read_counters()["semantic_full_scans"] == 2
+        assert store.read_counters()["semantic_full_scans"] == 1
 
     def test_a_snapshot_does_not_alias_the_live_counters(self, tmp_path: Path, opened) -> None:
         store = _store(tmp_path, semantic=1, opened=opened)
@@ -86,24 +87,50 @@ class TestSemanticSurface:
         assert after["semantic_rows_read"] - before["semantic_rows_read"] == 4
         assert after["rows_read"] - before["rows_read"] >= 4
 
-    def test_a_second_identical_semantic_search_scans_the_population_again(
+    def test_a_second_identical_semantic_search_reuses_the_resident_population(
         self, tmp_path: Path, opened
     ) -> None:
         """The read-volume assertion, in the form a live pod can make.
 
         Two identical searches with no write in between read the population
-        twice today. When the fix lands (resident scoring columns under a
-        (generation, data_version) token), the second call
-        stops scanning and these numbers stay flat — so this test is the ratchet
-        that has to be updated by the fix, not silently satisfied by it.
+        once: the first builds the resident scoring columns under a
+        (generation, data_version) token, and the second serves them without a
+        scan. This is the ratchet that pins the reuse, so a regression that
+        reintroduces a per-call scan flips it.
         """
         store = _store(tmp_path, semantic=4, opened=opened)
         store.get_semantic_context(query_text="tea")
         one = store.read_counters()
         store.get_semantic_context(query_text="tea")
         two = store.read_counters()
-        assert two["semantic_full_scans"] - one["semantic_full_scans"] == 1
-        assert two["semantic_rows_read"] - one["semantic_rows_read"] == 4
+        assert two["semantic_full_scans"] - one["semantic_full_scans"] == 0
+        assert two["semantic_rows_read"] - one["semantic_rows_read"] == 0
+
+    def test_an_over_budget_store_scans_once_per_query_not_twice(
+        self, tmp_path: Path, opened, monkeypatch
+    ) -> None:
+        """An oversized store keeps the per-call scan — ONE population read per
+        query, not two. The over-budget refusal hands back the rows it already
+        materialized instead of returning None and making the candidate helper
+        re-issue the identical SELECT."""
+        import kiro_crew.vector_memory as vm
+
+        store = _store(tmp_path, semantic=4, opened=opened)
+        # Force every build over budget so the refusal path is taken.
+        monkeypatch.setattr(vm, "_SEMANTIC_SCORING_MAX_BYTES", 1)
+        before = store.read_counters()
+        store.get_semantic_context(query_text="tea")
+        after = store.read_counters()
+        # Exactly one population scan for this query, not two.
+        assert after["semantic_full_scans"] - before["semantic_full_scans"] == 1
+        assert after["semantic_rows_read"] - before["semantic_rows_read"] == 4
+        # No snapshot is retained for an over-budget store.
+        assert store._semantic_scoring is None
+        # A second query still scans once (the per-call fallback), never zero
+        # (nothing resident) and never two.
+        store.get_semantic_context(query_text="tea")
+        again = store.read_counters()
+        assert again["semantic_full_scans"] - after["semantic_full_scans"] == 1
 
     def test_the_recency_branch_is_not_counted_as_a_population_scan(
         self, tmp_path: Path, opened
@@ -221,6 +248,7 @@ class TestObservabilityEndpoint:
         agent calls it twice with the same ``q`` and compares the two objects.
         """
         store = _store(tmp_path, semantic=4, opened=opened)
+        base = store.read_counters()
         first = json.loads(
             (await mem_mod.api_memory_observability(_request(store, query={"q": "tea"}))).text or ""
         )["reads"]
@@ -229,7 +257,14 @@ class TestObservabilityEndpoint:
         )["reads"]
         assert first["semantic_full_scans"] >= 1
         assert first["semantic_rows_read"] >= 4
-        # Identical second request, and the endpoint shows it paid for the
-        # population again — the observation this endpoint makes possible.
-        assert second["semantic_full_scans"] > first["semantic_full_scans"]
-        assert second["semantic_rows_read"] - first["semantic_rows_read"] >= 4
+        # The identical second request reuses the resident non-lesson scoring
+        # set, so it performs exactly one fewer population scan than the first —
+        # the query-aware scan is saved while the two lesson-population reads
+        # (get_lessons_context and get_lessons) are a different key range and
+        # still run each request.
+        first_request = first["semantic_full_scans"] - base["semantic_full_scans"]
+        second_request = second["semantic_full_scans"] - first["semantic_full_scans"]
+        assert second_request == first_request - 1
+        assert second["semantic_rows_read"] - first["semantic_rows_read"] < (
+            first["semantic_rows_read"] - base["semantic_rows_read"]
+        )

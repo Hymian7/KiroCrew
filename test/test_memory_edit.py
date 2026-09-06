@@ -638,3 +638,39 @@ def test_legacy_string_lesson_cannot_gain_scope_through_content_conversion(store
     result = memory_edit.apply_edit(store, "chosen", b"secret", preview["preview_id"])
     assert result["changed_count"] == 1
     assert json.loads(store.get_semantic(row["id"])["value_json"]) == corrected
+
+
+def test_a_fact_edit_invalidates_the_resident_semantic_scoring_set(tmp_path):
+    """A dashboard fact edit runs UPDATE semantic_memory on the store's own
+    connection, which moves neither data_version nor the write-time generation,
+    so apply_edit must drop the resident scoring snapshot or context keeps
+    ranking the stale row. The twin of the episode-content path. V1 only: the
+    resident scoring set is a V1 hybrid-scoring accelerator."""
+    store = VectorMemoryStore(db_path=tmp_path / "memory.db")
+    store.init()
+    try:
+        for index in range(3):
+            assert (
+                store.set_semantic(
+                    f"user.email{index:03}",
+                    {"address": f"person{index}@old.example", "note": "contact preference"},
+                    1.0,
+                    "user_explicit",
+                )
+                is None
+            )
+        # Warm the cache: a query-aware build makes the scoring set resident.
+        assert store.get_semantic_context(query_text="old.example contact")
+        assert store._semantic_scoring is not None
+
+        preview = memory_edit.preview_edit(store, "chosen", b"secret", body())
+        result = memory_edit.apply_edit(store, "chosen", b"secret", preview["preview_id"])
+        assert result["changed_count"] == 3
+
+        # The snapshot is dropped, and the next build reflects the edit.
+        assert store._semantic_scoring is None
+        refreshed = store.get_semantic_context(query_text="new.example contact")
+        assert "@new.example" in refreshed
+        assert "@old.example" not in refreshed
+    finally:
+        store.close()

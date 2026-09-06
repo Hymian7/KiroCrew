@@ -483,6 +483,11 @@ _MMR_MAX_POOL = 1000
 # a store at _DEFAULT_EPISODIC_MAX rows at the shipped 1024-d width, so a default
 # install is always inside it.
 _EPISODIC_SCORING_MAX_BYTES = 64 * 1024 * 1024
+# Semantic context needs the rendered keys and values as well as embeddings, so
+# its resident snapshot is bounded independently. Above this ceiling retrieval
+# preserves the existing per-call SQLite read rather than retaining unbounded
+# user data in the gateway process.
+_SEMANTIC_SCORING_MAX_BYTES = 64 * 1024 * 1024
 # Conservative ceiling on bound parameters in one statement. sqlite's own limit is
 # 32,766 on the bundled build but only 999 on hosts still on a pre-3.32 library,
 # and there is no cheap way to read it on every supported runtime, so batched id
@@ -1390,6 +1395,23 @@ def _kept_episodes(
     return [row for row in results if id(row) in chosen]
 
 
+@dataclass(frozen=True)
+class _SemanticScoringSet:
+    """Rows needed to rank and render query-aware semantic context.
+
+    ``get_semantic_context`` needs every active non-lesson key/value pair for
+    keyword scoring, its stored embedding for vector scoring, and ``updated_at``
+    for deterministic ties. Holding exactly those columns avoids an SQLite
+    population scan on unchanged context builds. The validity token matches the
+    episodic cache: in-process writes bump ``generation``; external writers move
+    SQLite's ``data_version``.
+    """
+
+    rows: tuple[dict[str, object], ...]
+    generation: int
+    data_version: int
+
+
 class VectorMemoryStore:
     """SQLite-backed structured memory with semantic keys and audit trail."""
 
@@ -1483,6 +1505,13 @@ class VectorMemoryStore:
         # generation or another process moves data_version. A sticky boolean
         # (the `_episodic_scoring_supported` shape) would never re-probe.
         self._episodic_scoring_refused: tuple[int, int, int] | None = None
+        # Query-aware semantic context reads a stable, query-independent row
+        # population. Keep that population resident only while the same
+        # in-process generation and cross-process SQLite version remain current.
+        self._semantic_scoring: _SemanticScoringSet | None = None
+        self._semantic_scoring_generation = 0
+        self._semantic_scoring_supported = True
+        self._semantic_scoring_refused: tuple[int, int] | None = None
         # Promotion keys already refused: the refusal is deterministic, so warn once per store
         # per distinct reject cause. Bounded and oldest-first, so an evicted cause may warn
         # once more rather than the set growing for the process lifetime.
@@ -2064,6 +2093,14 @@ class VectorMemoryStore:
             if self._db is not None:
                 self._db.close()
                 self._db = None
+                # The validity token is per-connection (data_version), so a
+                # fresh connection's baseline can equal a retained snapshot's;
+                # drop both resident scoring sets on the swap or a stale one
+                # survives the reconnect. Matches close()'s clears.
+                self._episodic_scoring = None
+                self._episodic_scoring_refused = None
+                self._semantic_scoring = None
+                self._semantic_scoring_refused = None
         try:
             self._init_database()
         except BaseException:
@@ -2242,6 +2279,13 @@ class VectorMemoryStore:
                 self._faiss_data_version = None
                 self._episodic_scoring = None
                 self._episodic_scoring_refused = None
+                # Clear the semantic twin too: init() can swap the connection on
+                # a live object in a long-lived process, and the validity token
+                # is per-connection, so a fresh connection's baseline
+                # data_version can equal a retained snapshot's — the snapshot
+                # must not survive a connection swap.
+                self._semantic_scoring = None
+                self._semantic_scoring_refused = None
             finally:
                 self._release_store_use_lock()
 
@@ -2711,6 +2755,7 @@ class VectorMemoryStore:
                     operation="create",
                 )
                 self.db.commit()
+                self._invalidate_semantic_scoring()
             except sqlite3.IntegrityError:
                 self.db.rollback()
                 return "existing"
@@ -3102,6 +3147,14 @@ class VectorMemoryStore:
                             now,
                         ),
                     )
+                # Invalidate the resident scoring set for BOTH paths: the
+                # semantic row was applied to this connection above, so the
+                # cache is stale even when the commit is deferred to the
+                # consolidation caller. An own-connection commit does not move
+                # data_version, so without this a consolidation would hide its
+                # new facts from recall until an unrelated write or a restart.
+                # The commit itself stays deferred for consolidation batches.
+                self._invalidate_semantic_scoring()
                 if not _consolidation:
                     self.db.commit()
             except (ValueError, sqlite3.IntegrityError) as exc:
@@ -3222,6 +3275,7 @@ class VectorMemoryStore:
                         f"{self._sem_guard}",
                         (blob, key, value_json),
                     )
+                    self._invalidate_semantic_scoring()
 
         # 9. Retire conflicting episodic entries that reference the old value
         # (called outside the lock — _retire_stale_episodic does a blocking embed
@@ -3414,6 +3468,10 @@ class VectorMemoryStore:
                     "old_value, new_value, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     ("delete", "semantic", key, row["value_json"], new_value, source, now),
                 )
+            # Drop the cached scoring rows under the writer lock: the tombstone
+            # removes this key from the active non-lesson population the cache
+            # holds, so the next context build must reread.
+            self._invalidate_semantic_scoring()
         if not is_supersede:
             # A forget writes its audit event best-effort AFTER committing the
             # tombstone, through the shared helper -- an unavailable event table
@@ -3661,13 +3719,27 @@ class VectorMemoryStore:
         # context.py does not guard this call — an unserialized fetch here
         # kills the whole subagent run (see the locked-fetch helper
         # contract). The helper materializes the rows.
-        with self._db_lock:
-            self._check_recall_query(recall_query)
-            all_rows = self._fetch_all_locked(
-                "SELECT key, value_json, updated_at, embedding, source FROM semantic_memory "
-                "WHERE is_deleted = 0 AND key NOT LIKE 'lesson.%'",
-                scan="semantic",
-            )
+        #
+        # The population is query-independent, so hold the scoring columns
+        # resident between calls (:class:`_SemanticScoringSet`) and fall back to
+        # the per-call scan for a store too large to cache or a library with no
+        # ``data_version`` pragma — the same two-rung shape the episodic path
+        # uses. Both rungs select identical columns so a cached and a scanned
+        # row score the same. The recall-space guard runs under the lock on
+        # either rung before any row is published.
+        scoring = self._semantic_scoring_set()
+        if scoring is not None:
+            with self._db_lock:
+                self._check_recall_query(recall_query)
+            all_rows: list = list(scoring.rows)
+        else:
+            with self._db_lock:
+                self._check_recall_query(recall_query)
+                all_rows = self._fetch_all_locked(
+                    "SELECT key, value_json, updated_at, embedding, source FROM semantic_memory "
+                    "WHERE is_deleted = 0 AND key NOT LIKE 'lesson.%'",
+                    scan="semantic",
+                )
 
         # Stored write-time vectors only — one embed per request (the query),
         # same as the lessons path. Re-embedding every row here was an
@@ -3978,6 +4050,18 @@ class VectorMemoryStore:
             self._faiss_id_map = []
             self._faiss_data_version = None
             self._invalidate_episodic_scoring()
+
+    def invalidate_semantic_content(self) -> None:
+        """Drop the resident semantic scoring set after a content edit.
+
+        Call after an edit transaction commits a change to `fact`/`directive`
+        (`semantic_memory`) rows on this store's own connection. An own-connection
+        commit does not move ``PRAGMA data_version`` and an external edit path does
+        not bump the write-time generation, so without this the resident snapshot
+        keeps ranking a tombstoned or stale row into context until an unrelated
+        local write or a restart. The twin of :meth:`invalidate_episode_content`.
+        """
+        self._invalidate_semantic_scoring()
 
     def _faiss_content_signature(self) -> str:
         digest = hashlib.sha256()
@@ -4837,6 +4921,94 @@ class VectorMemoryStore:
         """
         self._episodic_scoring_generation += 1
         self._episodic_scoring = None
+
+    def _invalidate_semantic_scoring(self) -> None:
+        """Drop cached query-aware semantic rows after a scoring-relevant write."""
+        self._semantic_scoring_generation += 1
+        self._semantic_scoring = None
+
+    def _semantic_scoring_set(self) -> _SemanticScoringSet | None:
+        """Return cached semantic scoring rows, or ``None`` for a per-call scan.
+
+        ``PRAGMA data_version`` catches another process changing the database;
+        the in-process generation catches this store's own commits. A snapshot
+        that would exceed the fixed retention budget is refused for that exact
+        token pair, so an oversized store pays one scan per state change rather
+        than rebuilding on every context request.
+        """
+        if not self._semantic_scoring_supported:
+            return None
+        with self._db_lock:
+            version = self._sqlite_data_version()
+            if version is None:
+                self._semantic_scoring_supported = False
+                self._semantic_scoring = None
+                logger.info(
+                    "sqlite has no data_version pragma; semantic scoring cache disabled "
+                    "(a second process writing this store could not be detected)"
+                )
+                return None
+            resident = self._semantic_scoring
+            if (
+                resident is not None
+                and resident.generation == self._semantic_scoring_generation
+                and resident.data_version == version
+            ):
+                return resident
+            token = (self._semantic_scoring_generation, version)
+            if self._semantic_scoring_refused == token:
+                return None
+            rows = self._fetch_all_locked(
+                "SELECT key, value_json, updated_at, embedding, source FROM semantic_memory "
+                "WHERE is_deleted = 0 AND key NOT LIKE 'lesson.%'",
+                scan="semantic",
+            )
+            budget = _SEMANTIC_SCORING_MAX_BYTES
+            cached_rows: list[dict[str, object]] = []
+            for raw in rows:
+                row = dict(raw)
+                # Strings and blobs are the user-data payload; the fixed margin
+                # accounts for the four dict entries and Python object headers.
+                row_bytes = 256
+                for value in row.values():
+                    if isinstance(value, str):
+                        row_bytes += len(value.encode("utf-8"))
+                    elif isinstance(value, bytes):
+                        row_bytes += len(value)
+                budget -= row_bytes
+                if budget < 0:
+                    logger.info(
+                        "Semantic scoring set over %d bytes; falling back to a per-call scan",
+                        _SEMANTIC_SCORING_MAX_BYTES,
+                    )
+                    self._semantic_scoring_refused = token
+                    # Clear any prior snapshot too: a store that held a valid one
+                    # and then crossed the budget through another process's commit
+                    # would otherwise retain up to the budget in keys/values/blobs
+                    # that no later call can serve (the generation/data_version
+                    # check rejects it), until an unrelated local write drops it.
+                    self._semantic_scoring = None
+                    # Hand back the rows already read as a TRANSIENT set (not
+                    # stored as resident): the population was materialized once
+                    # above, so returning it lets this call consume it instead of
+                    # the caller re-issuing the identical SELECT — one scan for
+                    # this query, not two. Subsequent calls hit the refused-token
+                    # early return and scan once each, which is the per-call
+                    # fallback the spec promises for an oversized store.
+                    return _SemanticScoringSet(
+                        rows=tuple(dict(r) for r in rows),
+                        generation=self._semantic_scoring_generation,
+                        data_version=version,
+                    )
+                cached_rows.append(row)
+            built = _SemanticScoringSet(
+                rows=tuple(cached_rows),
+                generation=self._semantic_scoring_generation,
+                data_version=version,
+            )
+            self._semantic_scoring_refused = None
+            self._semantic_scoring = built
+            return built
 
     def _sqlite_data_version(self) -> int | None:
         """``PRAGMA data_version``, or None when the library predates it.
@@ -7526,6 +7698,7 @@ class VectorMemoryStore:
             self._faiss_index = None
             self._faiss_id_map = []
             self._invalidate_episodic_scoring()
+            self._invalidate_semantic_scoring()
             try:
                 episodic = self.db.execute(
                     f"UPDATE {self._epi_rel} SET embedding = NULL WHERE embedding IS NOT NULL"
@@ -7970,6 +8143,13 @@ class VectorMemoryStore:
                     f"AND is_deleted = 0{self._sem_guard}",
                     (blob, row["key"], row["value_json"]),
                 )
+                # Drop the cached scoring rows under the writer lock, before the
+                # vector-commit context releases it: the stamp changes the
+                # embedding column the cache holds, and an own-connection commit
+                # does not move data_version, so a reader taking the lock in the
+                # gap between commit and a later invalidation would serve the
+                # just-embedded row scored keyword-only. Matches the write path.
+                self._invalidate_semantic_scoring()
             embedded += 1
             if progress is not None:
                 progress(embedded, total)

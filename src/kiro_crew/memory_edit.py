@@ -743,4 +743,13 @@ def apply_edit(store: Any, store_name: str, secret: bytes, token: Any) -> dict:
             for before, after in changes
         ):
             store.invalidate_episode_content()
+        if any(
+            before["kind"] != "episode" and not (after and after.get("_resolution"))
+            for before, after in changes
+        ):
+            # A fact/directive edit runs UPDATE semantic_memory on this store's
+            # own connection, which never moves data_version and does not bump
+            # the write-time generation, so the resident scoring snapshot must
+            # be dropped here or it keeps ranking the stale/tombstoned row.
+            store.invalidate_semantic_content()
     return result
