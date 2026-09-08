@@ -2087,16 +2087,32 @@ def _iter_shell_chars(text: str, state: int = 0, ansi: bool = False) -> "Iterato
     program anchor read this state in the allow direction: a walk that ends
     "still open" where bash closed hides a separator or a ``git`` word.
 
+    Two more bash rules live here, because a literal ``)`` inside either used
+    to arrive ``active`` and truncate every substitution span
+    (``$(echo ${v:-)}; ...)`` extracted ``echo ${v:-`` while bash runs the
+    rest): ``${...}`` parameter expansion, whose interior is data as far as
+    paren counting goes, and ``#`` comments, which run to the newline. Both
+    yield their interior ``active=False``. Anything this misses (an exotic
+    nesting, a ``#`` after ``)``) errs toward scanning MORE, never less --
+    the fail-closed direction for every consumer.
+
     *state* and *ansi* resume a walk, which is what lets a quoted word spanning
     whitespace be read without desyncing.
     """
     i = 0
     n = len(text)
     dollar_run = 0  # consecutive LITERAL ``$`` immediately before this char
+    # A ``#`` starts a comment only at the start of a word (bash: ``echo a#b``
+    # is one word). The set below is deliberately NARROW -- start of input,
+    # whitespace, newline and the separators that open a new word. A ``#``
+    # anywhere else stays ordinary (scanned) text: missing a real comment
+    # over-scans, while treating code as comment would hide it.
+    at_word_start = True
     while i < n:
         ch = text[i]
         if ch == "\\" and (state != 1 or ansi):
             dollar_run = 0  # an escaped ``$`` is data and introduces nothing
+            at_word_start = False
             if i + 1 >= n:
                 yield _ShellChar(i, ch, ch, False, state, ansi, True)
                 return
@@ -2119,11 +2135,68 @@ def _iter_shell_chars(text: str, state: int = 0, ansi: bool = False) -> "Iterato
                 ansi = dollar_run % 2 == 1
             elif ch == '"':
                 state = 2
+            elif ch == "$" and i + 1 < n and text[i + 1] == "{" and dollar_run % 2 == 0:
+                # ``${...}`` parameter expansion: this ``$`` is unpaired (an
+                # even run before it, so no ``$$`` PID pairing consumes it) and
+                # opens an expansion closed by the matching ``}``. The interior
+                # is data -- a ``)`` inside must not count as a substitution
+                # closer. Yield the delimiters as usual and the interior
+                # inactive; brace depth handles nesting, a backslash pair never
+                # closes, and an unclosed expansion simply runs out (malformed
+                # input bash would not execute; the walk keeps failing closed).
+                # Quote state is frozen across the span so an exotic interior
+                # cannot corrupt the rest of the walk.
+                yield _ShellChar(i, ch, ch, True, state, ansi, False)
+                yield _ShellChar(i + 1, "{", "{", True, state, ansi, False)
+                i += 2
+                dollar_run = 0
+                at_word_start = False
+                depth = 1
+                while i < n and depth > 0:
+                    c = text[i]
+                    if c == "\\" and i + 1 < n:
+                        yield _ShellChar(i, text[i : i + 2], text[i + 1], False, state, ansi, False)
+                        i += 2
+                        continue
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        depth -= 1
+                        if depth == 0:
+                            yield _ShellChar(i, c, c, True, state, ansi, False)
+                            i += 1
+                            break
+                    yield _ShellChar(i, c, c, False, state, ansi, False)
+                    i += 1
+                continue
+            elif ch == "#" and at_word_start:
+                # Comment to end of line: the ``#`` itself reads as usual, the
+                # interior is inert so a ``)`` inside cannot close a span, and
+                # the newline resumes the walk (a backslash-newline continues
+                # the comment, as in bash).
+                yield _ShellChar(i, ch, ch, True, state, ansi, False)
+                i += 1
+                dollar_run = 0
+                at_word_start = False
+                while i < n and text[i] != "\n":
+                    if text[i] == "\\" and i + 1 < n and text[i + 1] == "\n":
+                        yield _ShellChar(i, "\\\n", "\n", False, state, ansi, False)
+                        i += 2
+                        continue
+                    yield _ShellChar(i, text[i], text[i], False, state, ansi, False)
+                    i += 1
+                continue
         elif state == 1:
             if ch == "'":
                 state = 0
         elif ch == '"':
             state = 0
+        # A lone CR is deliberately absent from the word-start set: it is not
+        # a bash word boundary (``echo a\rb`` is one word).
+        if was_unquoted and ch in " \t\n;&|(":
+            at_word_start = True
+        else:
+            at_word_start = False
         dollar_run = dollar_run + 1 if was_unquoted and ch == "$" else 0
         yield _ShellChar(i, ch, ch, was_unquoted, state, ansi, False)
         i += 1
