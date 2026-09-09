@@ -69,12 +69,22 @@ def _url_payload_command(n: int) -> str:
 #: launch-approval directory and ``mcp/resolved``: gatewayd spawns an approved stub's
 #: backend outside the sandbox, so a session must not be able to write either path.
 #:
+#: Raised again, from 27,761, for modelling ``${...}`` parameter expansion and ``#``
+#: comments in the shell-char walk: a literal ``)`` inside either construct must not
+#: close a ``$(...)`` substitution span, so ``_iter_shell_chars`` gains two syntax
+#: branches and its regression pins grow with them. The expansion interior also
+#: reports its own single/double-quote state, and nests only on ``${`` (a bare
+#: ``{`` is an ordinary character), so the program-anchor walk reads a quoted
+#: ``$(`` as data and does not run the span past the ``}`` bash closes at --
+#: control logic that keeps a nested publish from hiding below a truncated span,
+#: not machinery.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_761
+_PACKAGE_LINE_BUDGET = 27_865
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

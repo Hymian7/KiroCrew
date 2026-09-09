@@ -2800,7 +2800,7 @@ class TestBuiltinDenyPatterns:
 
     def test_substitution_span_survives_expansion_and_comment_parens(self) -> None:
         """A literal ``)`` inside ``${...}`` or a ``#`` comment must not close
-        the substitution span (issue #9181).
+        the substitution span.
 
         ``_substitution_bodies`` feeds the nested-payload extractor: truncating
         at such a paren hands every downstream scan a fragment while bash runs
@@ -2820,6 +2820,67 @@ class TestBuiltinDenyPatterns:
         assert _substitution_bodies("echo a#b") == []
         # Nested expansion still extracts whole.
         assert _substitution_bodies("kill $(echo ${a:-${b}} done)") == ["echo ${a:-${b}} done"]
+
+    def test_expansion_close_ignores_quoted_braces(self) -> None:
+        """A quoted ``}`` inside ``${...}`` is literal per POSIX 2.6.2 and must
+        not close the expansion (Design + Opus blocking findings on the
+        frozen-quote interior loop).
+
+        Closing early desyncs the outer walk from bash: the stray quote flips
+        the walker into a quote state bash never enters, hiding the ``;`` and
+        the ``git`` word that follow -- an allow-direction miss.
+        """
+        from kiro_crew.security import _iter_shell_chars, _substitution_bodies
+
+        # Double-quoted ``}``: the expansion closes at the second brace, so
+        # the ``;`` separator stays active and visible to the segment split.
+        steps = list(_iter_shell_chars(': ${v:-"}"}; git push origin main'))
+        semi = next(s for s in steps if s.char == ";")
+        assert semi.active
+        # Single-quoted ``}`` around a quoted paren: the full outer body
+        # survives instead of truncating at the quoted ``)``.
+        assert _substitution_bodies("kill $(echo ${v:-'}X)Y'} ; git push origin main)") == [
+            "echo ${v:-'}X)Y'} ; git push origin main"
+        ]
+
+    def test_expansion_interior_reports_its_own_quote_state(self) -> None:
+        """A quoted ``$(`` inside ``${...}`` is reported with the span's quote
+        state, not the outer state.
+
+        The program-anchor walk tells single-quoted data (``'$('``) from an
+        unquoted substitution by ``step.state``, not by ``step.active``. An
+        interior char carrying the outer state reads a single-quoted ``$`` as
+        unquoted, so the anchor treats quoted data as a live ``$(...)`` and a
+        self-kill hidden behind it slips the denial -- an allow-direction miss.
+        """
+        from kiro_crew.security import _iter_shell_chars
+
+        # ``'$('`` inside the expansion: the ``$`` and ``(`` report state 1.
+        steps = {s.offset: s for s in _iter_shell_chars("a=${v:-'$('}b")}
+        assert steps[8].char == "$" and steps[8].state == 1
+        assert steps[9].char == "(" and steps[9].state == 1
+        # ``"$("`` reports state 2; a following unquoted char returns to 0.
+        steps = {s.offset: s for s in _iter_shell_chars('a=${v:-"$("}b')}
+        assert steps[8].char == "$" and steps[8].state == 2
+        assert steps[9].char == "(" and steps[9].state == 2
+
+    def test_expansion_nests_only_on_dollar_brace(self) -> None:
+        """A bare ``{`` inside ``${...}`` is an ordinary character; only ``${``
+        nests. Bumping depth on a bare ``{`` runs the span past the ``}`` bash
+        closes at, so the closer and the structure after it read as interior --
+        an allow-direction miss of the following command.
+        """
+        from kiro_crew.security import _iter_shell_chars
+
+        # ``${v:-{}`` closes at the first ``}``; the trailing `` z`` is OUTSIDE.
+        steps = {s.offset: s for s in _iter_shell_chars("a=${v:-{} z")}
+        assert steps[8].char == "}" and steps[8].active  # the closer
+        assert steps[10].char == "z" and steps[10].active  # outside, visible
+        # A genuine ``${`` still nests: the inner and outer both close.
+        steps = list(_iter_shell_chars("a=${v:-${w}} z"))
+        closer = [s for s in steps if s.char == "}"]
+        assert closer[-1].active and closer[-1].offset == 11
+        assert steps[-1].char == "z" and steps[-1].active
 
     def test_blocks_background_operator_bypass(self) -> None:
         """``&`` (single ampersand, the bash background operator) must split
