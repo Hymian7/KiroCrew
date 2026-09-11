@@ -39,6 +39,7 @@ import os
 import shutil
 import stat
 import stat as _stat
+import tempfile
 from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ from pathlib import Path, PurePath
 from typing import Callable
 
 from kiro_crew.atomic_write import atomic_write, atomic_write_at
-from kiro_crew.platform_compat import open_file_no_reparse
+from kiro_crew.platform_compat import open_file_no_reparse, pin_directory
 
 __all__ = [
     "PUT_BACK_FAILED",
@@ -88,6 +89,7 @@ __all__ = [
     "supports_pinned_tree_walk",
     "supports_pinned_walk",
     "unlink_verified",
+    "unlink_verified_by_name",
 ]
 
 
@@ -2019,14 +2021,264 @@ def unlink_verified(
     return True
 
 
+def unlink_verified_by_name(
+    parent: Path,
+    name: str,
+    expect: tuple[int, int],
+    *,
+    on_error: Callable[[OSError], None] | None = None,
+) -> bool:
+    """Unlink *parent/name* only while it holds ``(st_dev, st_ino)`` *expect*.
+
+    This is the path-only sibling of :func:`unlink_verified` for the Windows
+    branch and client-side asides that have no directory descriptor. It pins
+    the parent, delegates to :func:`unlink_verified` on POSIX, and checks the
+    regular-file identity under the pin before unlinking on Windows. An absent
+    or mismatched name is a deliberate refusal and returns ``False`` without
+    deleting anything.
+    """
+    pin = pin_directory(parent)
+    try:
+        if os.name != "nt":
+            return unlink_verified(pin, name, expect, on_error=on_error)
+        target = parent / name
+        try:
+            info = os.stat(target, follow_symlinks=False)
+        except OSError:
+            return False
+        if not _stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expect:
+            return False
+        try:
+            os.unlink(target)
+        except OSError as exc:
+            if on_error is not None:
+                on_error(exc)
+            return False
+        return True
+    finally:
+        os.close(pin)
+
+
 #: Outcomes of :func:`put_back_no_clobber`. ``None`` means the name is back.
 PUT_BACK_NAME_TAKEN = "name_taken"
 PUT_BACK_FAILED = "failed"
 
 
+def _copy_bytes_to_stage(src: int, stage_fd: int) -> bool:
+    """Copy *src* into *stage_fd*, fsyncing only complete content."""
+    try:
+        while True:
+            chunk = os.read(src, 1 << 20)
+            if not chunk:
+                break
+            while chunk:
+                chunk = chunk[os.write(stage_fd, chunk) :]
+        os.fsync(stage_fd)
+    except OSError:
+        return False
+    return True
+
+
+def _stage_bytes_for_publish(
+    src: int, dst_parent_fd: int, dst_name: str
+) -> tuple[str, tuple[int, int]] | None:
+    """Copy *src* into a private fsynced temp under *dst_parent_fd*.
+
+    Returns the staged name and identity, or ``None`` on any failure. Creation
+    and cleanup stay relative to the caller's pinned directory descriptor, so a
+    rename of the path spelling cannot redirect either operation.
+    """
+    stage_fd: int | None = None
+    stage_name = ""
+    for _attempt in range(16):
+        stage_name = f"{dst_name}.{os.urandom(8).hex()}.crew-gc"
+        try:
+            stage_fd = os.open(
+                stage_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=dst_parent_fd,
+            )
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+        break
+    if stage_fd is None:
+        return None
+    copied = _copy_bytes_to_stage(src, stage_fd)
+    staged = os.fstat(stage_fd)
+    stage_ident = (staged.st_dev, staged.st_ino)
+    os.close(stage_fd)
+    if not copied:
+        unlink_verified(dst_parent_fd, stage_name, stage_ident)
+        return None
+    return stage_name, stage_ident
+
+
+def _stage_bytes_for_publish_by_name(
+    src: int, dst_parent: Path, dst_name: str
+) -> tuple[Path, tuple[int, int]] | None:
+    """Keep the Windows staging path where directory descriptors are unavailable."""
+    try:
+        stage_fd, stage_name = tempfile.mkstemp(
+            dir=os.fspath(dst_parent), prefix=dst_name + ".", suffix=".crew-gc"
+        )
+    except OSError:
+        return None
+    stage = Path(stage_name)
+    copied = _copy_bytes_to_stage(src, stage_fd)
+    staged = os.fstat(stage_fd)
+    stage_ident = (staged.st_dev, staged.st_ino)
+    os.close(stage_fd)
+    if not copied:
+        with suppress(OSError):
+            unlink_verified_by_name(dst_parent, stage.name, stage_ident)
+        return None
+    return stage, stage_ident
+
+
+def _open_verified_source_by_name(src_path: Path, expect_ino: int) -> int | None:
+    """Open and verify the by-name source, returning only its pinned descriptor."""
+    try:
+        src = open_file_no_reparse(src_path, nonblocking=True)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(src)
+        if not _stat.S_ISREG(opened.st_mode) or opened.st_ino != expect_ino:
+            os.close(src)
+            return None
+    except OSError:
+        os.close(src)
+        return None
+    return src
+
+
+def _put_back_no_clobber_windows_by_name(
+    src_parent: Path,
+    dst_parent: Path,
+    src_name: str,
+    dst_name: str,
+    *,
+    expect_ino: int,
+) -> str | None:
+    """Keep the Windows atomic no-clobber rename path descriptor-free."""
+    try:
+        dst_pin = pin_directory(dst_parent)
+    except OSError:
+        return PUT_BACK_FAILED
+    src_pin: int | None = None
+    try:
+        if src_parent != dst_parent:
+            try:
+                src_pin = pin_directory(src_parent)
+            except OSError:
+                return PUT_BACK_FAILED
+        src = _open_verified_source_by_name(src_parent / src_name, expect_ino)
+        if src is None:
+            return PUT_BACK_FAILED
+        try:
+            staged = _stage_bytes_for_publish_by_name(src, dst_parent, dst_name)
+            if staged is None:
+                return PUT_BACK_FAILED
+            stage_path, stage_ident = staged
+            dst_path = dst_parent / dst_name
+            try:
+                os.link(stage_path, dst_path)
+            except FileExistsError:
+                with suppress(OSError):
+                    unlink_verified_by_name(dst_parent, stage_path.name, stage_ident)
+                return PUT_BACK_NAME_TAKEN
+            except (OSError, NotImplementedError):
+                try:
+                    os.rename(stage_path, dst_path)
+                except FileExistsError:
+                    with suppress(OSError):
+                        unlink_verified_by_name(dst_parent, stage_path.name, stage_ident)
+                    return PUT_BACK_NAME_TAKEN
+                except OSError:
+                    with suppress(OSError):
+                        unlink_verified_by_name(dst_parent, stage_path.name, stage_ident)
+                    return PUT_BACK_FAILED
+                return None
+            with suppress(OSError):
+                unlink_verified_by_name(dst_parent, stage_path.name, stage_ident)
+            return None
+        finally:
+            os.close(src)
+    finally:
+        if src_pin is not None:
+            os.close(src_pin)
+        os.close(dst_pin)
+
+
+def _put_back_no_clobber_by_name(
+    src_parent: Path,
+    dst_parent: Path,
+    src_name: str,
+    dst_name: str,
+    *,
+    expect_ino: int,
+) -> str | None:
+    """Portable fallback with a pinned POSIX destination and the Windows rename path."""
+    if os.name == "nt":
+        return _put_back_no_clobber_windows_by_name(
+            src_parent,
+            dst_parent,
+            src_name,
+            dst_name,
+            expect_ino=expect_ino,
+        )
+    supports_dir_fd: set[object] = getattr(os, "supports_dir_fd", set())
+    if (
+        not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or os.open not in supports_dir_fd
+        or os.link not in supports_dir_fd
+        or os.unlink not in supports_dir_fd
+    ):
+        return PUT_BACK_FAILED
+    try:
+        dst_parent_fd = os.open(
+            dst_parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except OSError:
+        return PUT_BACK_FAILED
+    try:
+        src = _open_verified_source_by_name(src_parent / src_name, expect_ino)
+        if src is None:
+            return PUT_BACK_FAILED
+        try:
+            staged = _stage_bytes_for_publish(src, dst_parent_fd, dst_name)
+            if staged is None:
+                return PUT_BACK_FAILED
+            stage_name, stage_ident = staged
+            try:
+                os.link(
+                    stage_name,
+                    dst_name,
+                    src_dir_fd=dst_parent_fd,
+                    dst_dir_fd=dst_parent_fd,
+                )
+            except FileExistsError:
+                unlink_verified(dst_parent_fd, stage_name, stage_ident)
+                return PUT_BACK_NAME_TAKEN
+            except (OSError, NotImplementedError):
+                unlink_verified(dst_parent_fd, stage_name, stage_ident)
+                return PUT_BACK_FAILED
+            unlink_verified(dst_parent_fd, stage_name, stage_ident)
+            return None
+        finally:
+            os.close(src)
+    finally:
+        os.close(dst_parent_fd)
+
+
 def put_back_no_clobber(
-    src_parent_fd: int,
-    dst_dir_fd: int,
+    src_parent_fd: int | str | Path,
+    dst_dir_fd: int | str | Path,
     src_name: str,
     dst_name: str,
     *,
@@ -2075,9 +2327,24 @@ def put_back_no_clobber(
     supports, so a filesystem without hard links passes that probe and then refuses the
     call. A guard built on the probe is a guard that fails exactly where it matters.
 
+    ``src_parent_fd`` and ``dst_dir_fd`` are normally directory descriptors. When
+    directory descriptors are unavailable, pass their parent paths instead; the
+    fallback applies the same no-follow, inode, regular-file, staged-publish and
+    no-clobber checks by name.
+
     Returns ``None`` when the name is back, :data:`PUT_BACK_NAME_TAKEN` when something else
     holds it (nothing was overwritten), or :data:`PUT_BACK_FAILED`.
     """
+    if not isinstance(src_parent_fd, int) and not isinstance(dst_dir_fd, int):
+        return _put_back_no_clobber_by_name(
+            Path(src_parent_fd),
+            Path(dst_dir_fd),
+            src_name,
+            dst_name,
+            expect_ino=expect_ino,
+        )
+    if not isinstance(src_parent_fd, int) or not isinstance(dst_dir_fd, int):
+        return PUT_BACK_FAILED
     # O_NONBLOCK for the same reason `copy_file_pinned` carries it: O_NOFOLLOW refuses a
     # symbolic link and does NOT refuse a FIFO, so a named pipe at this name blocks the open
     # until a writer appears -- forever, with no timeout and no message. That is not a wrong

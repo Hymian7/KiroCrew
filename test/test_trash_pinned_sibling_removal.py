@@ -569,6 +569,273 @@ class TestTheApprovalReadsOneFile:
 class TestPutBackNoClobber:
     """The undo half of "move it aside, remove the tree, put it back"."""
 
+    def test_the_by_name_fallback_never_stages_at_the_canonical_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        aside = tmp_path / "debris"
+        aside.write_bytes(b"complete source bytes")
+        destination = tmp_path / "index"
+        moved_ino = aside.stat().st_ino
+        real_write = os.write
+
+        def _write_then_fail(fd: int, data: bytes) -> int:
+            real_write(fd, data[: len(data) // 2])
+            raise OSError(errno.EIO, "copy failed")
+
+        monkeypatch.setattr(os, "write", _write_then_fail)
+        assert (
+            pinned_fs.put_back_no_clobber(
+                tmp_path,
+                tmp_path,
+                aside.name,
+                destination.name,
+                expect_ino=moved_ino,
+            )
+            == pinned_fs.PUT_BACK_FAILED
+        )
+        assert not destination.exists()
+        assert aside.read_bytes() == b"complete source bytes"
+
+    def test_the_by_name_fallback_publishes_whole_bytes(self, tmp_path: Path) -> None:
+        aside = tmp_path / "debris"
+        aside.write_bytes(b"complete source bytes")
+        destination = tmp_path / "index"
+
+        assert (
+            pinned_fs.put_back_no_clobber(
+                tmp_path,
+                tmp_path,
+                aside.name,
+                destination.name,
+                expect_ino=aside.stat().st_ino,
+            )
+            is None
+        )
+        assert destination.read_bytes() == b"complete source bytes"
+        assert aside.read_bytes() == b"complete source bytes"
+
+    def test_the_by_name_fallback_never_publishes_through_a_swapped_parent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A destination-parent rename cannot redirect the staged publish."""
+        source_parent = tmp_path / "aside"
+        source_parent.mkdir()
+        source = source_parent / "debris"
+        source.write_bytes(b"complete source bytes")
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+        pinned_parent = tmp_path / "tree-pinned"
+        real_fstat = os.fstat
+        swapped: list[bool] = []
+
+        def swap_after_source_open(fd: int):
+            info = real_fstat(fd)
+            if not swapped:
+                destination_parent.rename(pinned_parent)
+                destination_parent.mkdir()
+                swapped.append(True)
+            return info
+
+        monkeypatch.setattr(os, "fstat", swap_after_source_open)
+        result = pinned_fs.put_back_no_clobber(
+            source_parent,
+            destination_parent,
+            source.name,
+            "index",
+            expect_ino=source.stat().st_ino,
+        )
+
+        assert swapped == [True]
+        assert not (destination_parent / "index").exists()
+        assert result in (None, pinned_fs.PUT_BACK_FAILED)
+        if result is None:
+            assert (pinned_parent / "index").read_bytes() == b"complete source bytes"
+        else:
+            assert not (pinned_parent / "index").exists()
+
+    def test_windows_by_name_restore_refuses_reparse_destination_parent(
+        self, tmp_path: Path
+    ) -> None:
+        source_parent = tmp_path / "aside"
+        source_parent.mkdir()
+        aside = source_parent / "debris"
+        aside.write_bytes(b"complete source bytes")
+        evil_target = tmp_path / "outside"
+        evil_target.mkdir()
+        destination_parent = tmp_path / "tree"
+        destination_parent.symlink_to(evil_target, target_is_directory=True)
+
+        result = pinned_fs._put_back_no_clobber_windows_by_name(
+            source_parent,
+            destination_parent,
+            aside.name,
+            "settings.local.json",
+            expect_ino=aside.stat().st_ino,
+        )
+
+        assert result == pinned_fs.PUT_BACK_FAILED
+        assert not (evil_target / "settings.local.json").exists()
+        assert not list(evil_target.glob("*.crew-gc"))
+
+    def test_windows_by_name_restore_refuses_reparse_source_leaf(self, tmp_path: Path) -> None:
+        source_parent = tmp_path / "aside"
+        source_parent.mkdir()
+        secret = tmp_path / "secret.txt"
+        secret.write_bytes(b"bytes outside the restore")
+        aside = source_parent / "debris"
+        aside.symlink_to(secret)
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+
+        result = pinned_fs._put_back_no_clobber_windows_by_name(
+            source_parent,
+            destination_parent,
+            aside.name,
+            "settings.local.json",
+            expect_ino=secret.stat().st_ino,
+        )
+
+        assert result == pinned_fs.PUT_BACK_FAILED
+        assert not (destination_parent / "settings.local.json").exists()
+        assert not list(destination_parent.glob("*.crew-gc"))
+
+    def test_windows_by_name_restore_publishes_without_stage_litter(self, tmp_path: Path) -> None:
+        source_parent = tmp_path / "aside"
+        source_parent.mkdir()
+        aside = source_parent / "debris"
+        aside.write_bytes(b"complete source bytes")
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+
+        result = pinned_fs._put_back_no_clobber_windows_by_name(
+            source_parent,
+            destination_parent,
+            aside.name,
+            "settings.local.json",
+            expect_ino=aside.stat().st_ino,
+        )
+
+        assert result is None
+        assert (destination_parent / "settings.local.json").read_bytes() == b"complete source bytes"
+        assert aside.read_bytes() == b"complete source bytes"
+        assert not list(destination_parent.glob("*.crew-gc"))
+
+    def test_windows_by_name_cleanup_preserves_a_post_publish_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        source_parent = tmp_path / "aside"
+        source_parent.mkdir()
+        aside = source_parent / "debris"
+        aside.write_bytes(b"complete source bytes")
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+        destination = destination_parent / "settings.local.json"
+        real_link = os.link
+
+        def publish_then_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            real_link(src, dst, *args, **kwargs)
+            stage = Path(src)
+            stage.unlink()
+            stage.write_bytes(b"foreign")
+
+        monkeypatch.setattr(os, "link", publish_then_replace)
+        result = pinned_fs._put_back_no_clobber_windows_by_name(
+            source_parent,
+            destination_parent,
+            aside.name,
+            destination.name,
+            expect_ino=aside.stat().st_ino,
+        )
+
+        assert result is None
+        assert destination.read_bytes() == b"complete source bytes"
+        replacement = list(destination_parent.glob("*.crew-gc"))
+        assert len(replacement) == 1
+        assert replacement[0].read_bytes() == b"foreign"
+
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_stage_copy_failure_removes_its_own_partial_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, by_name: bool
+    ) -> None:
+        source = tmp_path / "source"
+        source.write_bytes(b"payload")
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+        src_fd = os.open(source, os.O_RDONLY)
+        dst_fd = os.open(destination_parent, pinned_fs.dir_flags())
+        monkeypatch.setattr(pinned_fs, "_copy_bytes_to_stage", lambda *_args: False)
+        try:
+            if by_name:
+                result = pinned_fs._stage_bytes_for_publish_by_name(
+                    src_fd, destination_parent, "settings.local.json"
+                )
+            else:
+                result = pinned_fs._stage_bytes_for_publish(src_fd, dst_fd, "settings.local.json")
+        finally:
+            pinned_fs.close_all((src_fd, dst_fd))
+
+        assert result is None
+        assert not list(destination_parent.glob("*.crew-gc"))
+
+    @pytest.mark.parametrize("by_name", [False, True])
+    def test_stage_copy_failure_preserves_a_replacement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, by_name: bool
+    ) -> None:
+        source = tmp_path / "source"
+        source.write_bytes(b"payload")
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+        src_fd = os.open(source, os.O_RDONLY)
+        dst_fd = os.open(destination_parent, pinned_fs.dir_flags())
+
+        def replace_stage(*_args: object) -> bool:
+            stages = list(destination_parent.glob("*.crew-gc"))
+            assert len(stages) == 1
+            stages[0].unlink()
+            stages[0].write_bytes(b"foreign")
+            return False
+
+        monkeypatch.setattr(pinned_fs, "_copy_bytes_to_stage", replace_stage)
+        try:
+            if by_name:
+                result = pinned_fs._stage_bytes_for_publish_by_name(
+                    src_fd, destination_parent, "settings.local.json"
+                )
+            else:
+                result = pinned_fs._stage_bytes_for_publish(src_fd, dst_fd, "settings.local.json")
+        finally:
+            pinned_fs.close_all((src_fd, dst_fd))
+
+        assert result is None
+        replacement = list(destination_parent.glob("*.crew-gc"))
+        assert len(replacement) == 1
+        assert replacement[0].read_bytes() == b"foreign"
+
+    def test_windows_by_name_restore_preserves_an_occupied_destination(
+        self, tmp_path: Path
+    ) -> None:
+        source_parent = tmp_path / "aside"
+        source_parent.mkdir()
+        aside = source_parent / "debris"
+        aside.write_bytes(b"complete source bytes")
+        destination_parent = tmp_path / "tree"
+        destination_parent.mkdir()
+        destination = destination_parent / "settings.local.json"
+        destination.write_bytes(b"arrived while the name was vacant")
+
+        result = pinned_fs._put_back_no_clobber_windows_by_name(
+            source_parent,
+            destination_parent,
+            aside.name,
+            destination.name,
+            expect_ino=aside.stat().st_ino,
+        )
+
+        assert result == pinned_fs.PUT_BACK_NAME_TAKEN
+        assert destination.read_bytes() == b"arrived while the name was vacant"
+        assert aside.read_bytes() == b"complete source bytes"
+        assert not list(destination_parent.glob("*.crew-gc"))
+
     def test_it_falls_back_to_a_copy_where_the_filesystem_has_no_links(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
