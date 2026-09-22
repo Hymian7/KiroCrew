@@ -69,12 +69,19 @@ def _url_payload_command(n: int) -> str:
 #: launch-approval directory and ``mcp/resolved``: gatewayd spawns an approved stub's
 #: backend outside the sandbox, so a session must not be able to write either path.
 #:
+#: Raised again, from 27,761, for the ``app-unit-approvals.json`` protected-path
+#: entry in ``paths.py`` (the app contribution protocol). That file is the only
+#: thing between an app's declared unit contributions and read/append access to a
+#: crew member's whole log -- the runtime intersects the declaration with it -- so a
+#: session must not be able to write it; the twelve lines are the ``_CREW_SECRET_LEAVES``
+#: entry and its rationale, not control logic that belongs elsewhere.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_761
+_PACKAGE_LINE_BUDGET = 27_773
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second
