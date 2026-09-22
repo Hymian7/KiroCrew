@@ -76,6 +76,11 @@ def _terminal_poll(state: str = "MERGED", body: str = "read"):
 
     def _poll(identity, message, probe):
         probe.observation = _reading(state)
+        # The real gh-pr probe is a FETCHER: it returns ``observations=[]`` and never
+        # attributes a TERMINAL key, so the kernel's verdict carries no keys on this
+        # path. Emitting a key here would feed the code a signal the real probe never
+        # produces and mask the merged-versus-blocked decision, which for a pull
+        # request comes from ``observation.merged``, not from ``verdict.keys``.
         return _an.irq.Verdict(_an.irq.Outcome.QUIET, body)
 
     return _poll
