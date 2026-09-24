@@ -56,8 +56,8 @@ def _url_payload_command(n: int) -> str:
 #: budget is that size plus room for the machinery, plus the redaction record,
 #: credential-source and allowed-host modules, plus the resolver child script
 #: (``_child_realpath.py``, ~190 lines) that lives beside the resolver it serves
-#: rather than in the pool package. It is a bound on total volume:
-#: relocating a declaration between submodules moves nothing across it.
+#: rather than in the pool package. It is a bound on total volume: relocating a
+#: declaration between submodules moves nothing across it.
 #:
 #: Raised again, from 27,200, when the facade stopped binding re-exported names
 #: eagerly and began resolving each through its owner. That trades one import block
@@ -69,12 +69,17 @@ def _url_payload_command(n: int) -> str:
 #: launch-approval directory and ``mcp/resolved``: gatewayd spawns an approved stub's
 #: backend outside the sandbox, so a session must not be able to write either path.
 #:
+#: Re-pinned from 27,761 for the assignment resolver's whole-script walk in
+#: ``shell_normalizer.py``: command-boundary, quoted-separator, bounded ``eval``-join,
+#: two-reading guarded-reassignment and glued-name binding rules, 305 lines measured
+#: -- the same kind of raise the resolver child script made.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 27_761
+_PACKAGE_LINE_BUDGET = 28_066
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

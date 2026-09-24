@@ -9663,15 +9663,18 @@ class TestGluedShellCommandPayloadExtraction:
         region's end, so the correct split was never a candidate: the payload
         read as ``c<name>=…``, the assignment went to a different name, the
         use never resolved and the mint went unexamined -- while a short name
-        was denied.  A word that long matters only as a name the payload
-        refers back to, so the split is yielded where the first word it
-        produces is referenced later -- whatever padding precedes the option
-        ``c`` (``-C<78 flags>c'<78 letters>=…'`` puts it out of reach of any
-        fixed window from either end).
+        was denied.  A word that long is only ever a name with flags glued to
+        its front, so the resolver reads its binding under every suffix the
+        script refers back to -- whatever padding precedes the option ``c``
+        (``-C<78 flags>c'<78 letters>=…'`` puts it out of reach of any fixed
+        window from either end) -- in the ONE first-``c`` frame.  Yielding one
+        payload per referenced suffix instead grew the candidate set with the
+        square root of the token and the scan as O(n^1.5) (found in review).
         """
         from kiro_crew.security import (
             _CARRIER_SPLIT_WINDOW,
             _is_credential_mint,
+            _resolve_local_assignments,
             _shell_c_carrier_payloads,
             is_denied,
         )
@@ -9688,30 +9691,363 @@ class TestGluedShellCommandPayloadExtraction:
                 ):
                     assert _is_credential_mint(cmd.lower(), raw_text=cmd), cmd
                     assert is_denied(cmd) is not None, cmd
-        # The ``<name>=…`` split is among the candidates for the long name, with
-        # and without padding before the option letter.
+        # The long name is NOT enumerated as a split: the first-``c`` frame carries
+        # it glued, and the resolver reads the glued first name under the suffix the
+        # script uses -- with and without padding, and for a name with a non-letter
+        # tail (``name_1``) referenced through it.
         script = f"{long_name}=kirocrew; ${long_name} token"
-        assert script in _shell_c_carrier_payloads(f"-cc{script}")
-        assert script in _shell_c_carrier_payloads(f"-c{padding}c{script}")
-        # A name referenced only through its leading letters (``name_1``) is
-        # still found; a ``c`` before the window whose first word is never
-        # referenced yields nothing beyond the always-present first-``c`` split.
-        assert f"{long_name}_1=x; ${long_name}_1" in _shell_c_carrier_payloads(
-            f"-c{padding}c{long_name}_1=x; ${long_name}_1"
+        assert _shell_c_carrier_payloads(f"-cc{script}") == [f"c{script}"]
+        assert _shell_c_carrier_payloads(f"-c{padding}c{script}") == [f"{padding}c{script}"]
+        assert (
+            _resolve_local_assignments([f"c{long_name}=kirocrew", ";", f"${long_name}", "token"])[
+                -2
+            ]
+            == "kirocrew"
+        )
+        assert (
+            _resolve_local_assignments(
+                [f"{padding}c{long_name}_1=kirocrew", ";", f"${long_name}_1", "token"]
+            )[-2]
+            == "kirocrew"
+        )
+        # Only LETTERS may separate the use from the first name (they are the glued
+        # flags); a short first name is never read this way; a name bound in its own
+        # right wins over the glued reading.
+        assert (
+            _resolve_local_assignments([f"c1{long_name}=kirocrew", ";", f"${long_name}"])[-1]
+            == f"${long_name}"
+        )
+        assert _resolve_local_assignments(["cx=kirocrew", ";", "$x", "token"])[-2] == "$x"
+        assert (
+            _resolve_local_assignments(
+                [f"c{long_name}=kirocrew", ";", f"{long_name}=echo", ";", f"${long_name}", "token"]
+            )[-2]
+            == "echo"
         )
         assert _shell_c_carrier_payloads(f"-{padding}c{padding}'ls'") == [f"{padding}'ls'"]
         # Benign spellings with a long assignment name stay allowed.
         assert is_denied(f"bash -Cc'{long_name}=ls; ${long_name} -la'") is None
         assert is_denied(f"bash -C{padding}c'{long_name}=ls; ${long_name} -la'") is None
 
+    def test_a_spaced_carrier_payload_is_walked_whole(self) -> None:
+        """A quoted script is ONE operand; its inner ``;`` is not a top-level operator.
+
+        ``bash -c '<name>=<cli>; $<name> <verb>'`` hands the whole script to
+        ``-c`` as one token, but the outer frame's assignment resolver split
+        that token at its inner ``;`` -- it begins with an assignment and
+        carries an operator -- so the payload walk, which takes the ONE token
+        after the carrier, descended only ``<name>=<cli>`` and the script's
+        own command line was never examined.  Measured ALLOWED for the spaced
+        ``-c``, ``eval``, herestring and ``env -S`` carriers at every name
+        length while the shell ran the mint (the glued ``-c'…'`` spelling was
+        denied, because a ``-``-led token is never split).  A token holding
+        whitespace was quoted -- shlex splits on every unquoted whitespace --
+        so it is yielded whole AHEAD of its pieces: the whole reaches the walk,
+        which re-tokenizes it as its own command line, and the pieces keep
+        resolving a top-level glued run whose quoted VALUE holds the space.
+        """
+        from kiro_crew.security import (
+            _CARRIER_SPLIT_WINDOW,
+            _is_credential_mint,
+            _split_glued_operators,
+            is_denied,
+        )
+
+        long_name = "a" * (_CARRIER_SPLIT_WINDOW + 14)
+        for name in ("x", long_name):
+            script = f"{name}=kirocrew; ${name} token"
+            for cmd in (
+                *(f"{shell} -Cc '{script}'" for shell in ("zsh", "bash", "sh")),
+                *(f"{shell} -c '{script}'" for shell in ("zsh", "bash", "sh")),
+                f"bash -x -c '{script}'",
+                f"bash -c -- '{script}'",
+                f'bash -c "{script}"',
+                f"eval '{script}'",
+                f"bash <<< '{script}'",
+                f"env -S '{script}'",
+                f"bash -c '{name}=kirocrew;${name} token'",
+                f"bash -c '{name}=kirocrew && ${name} token'",
+                # The script's own binding wins over an outer one of the same name.
+                f"{name}=foo; bash -c '{script}'",
+                # An outer binding the script does NOT assign still reaches it
+                # (``eval`` runs in the same shell) -- the whole-token reading
+                # must not lose it.
+                f"y=kirocrew; eval '{name}=${{y}}; ${name} token'",
+                f"y=kirocrew; eval '{name}=$y;${name} token'",
+                # ...and stays in force until the script reassigns the name: a
+                # reassignment AFTER the use does not hide the outer binding.
+                f"{name}=kirocrew; eval 'y=1; ${name} token; {name}=foo'",
+                f"{name}=kirocrew; eval '${name} token; {name}=foo'",
+                # A reassignment GUARDED by ``||``/``&&`` may not run, so it does
+                # not hide the protected binding before it -- inside the script,
+                # and at top level.
+                f"{name}=kirocrew; eval '{name}=kirocrew || {name}=echo; ${name} token'",
+                f"eval '{name}=kirocrew || {name}=echo; ${name} token'",
+                f"bash -c '{name}=kirocrew && {name}=echo; ${name} token'",
+                f"{name}=kirocrew || {name}=echo; ${name} token",
+                f"{name}=echo || {name}=kirocrew; ${name} token",
+                # A prefix assignment scoped to ONE command (``X=foo true``) leaves
+                # the shell's binding untouched, so it does not hide it either.
+                f"{name}=kirocrew; eval '{name}=foo true; ${name} token'",
+                f"{name}=kirocrew; bash -c '{name}=foo y=bar true; ${name} token'",
+                f"{name}=kirocrew; {name}=foo true; ${name} token",
+                # A segment's WHOLE leading run of assignments is the script's
+                # own binding, not only its first word.
+                f"{name}=foo; bash -c 'y=1 {name}=kirocrew; ${name} token'",
+                f"{name}=foo; eval 'y=1 {name}=kirocrew; ${name} token'",
+                # A reassignment that runs in a SUBSHELL (``| true``, ``&``) never
+                # reaches the shell that runs the use, so it does not hide the
+                # protected binding either -- inside the script, and at top level.
+                f"{name}=kirocrew; eval '{name}=foo | true; ${name} token'",
+                f"{name}=kirocrew; eval '{name}=foo & ${name} token'",
+                f"{name}=kirocrew; {name}=foo | true; ${name} token",
+                f"{name}=kirocrew; {name}=foo & ${name} token",
+                f"{name}=kirocrew; {name}=foo | {name}=bar; ${name} token",
+            ):
+                assert _is_credential_mint(cmd.lower(), raw_text=cmd), cmd
+                assert is_denied(cmd) is not None, cmd
+        # The unit: a whitespace-bearing token yields the whole first, then the
+        # pieces; the glued evasion this splitter exists for has no whitespace
+        # and is split exactly as before.
+        assert _split_glued_operators(["x=kirocrew; $x token"]) == [
+            "x=kirocrew; $x token",
+            "x=kirocrew",
+            ";",
+            " $x token",
+        ]
+        assert _split_glued_operators(["x=kirocrew\t$x"]) == ["x=kirocrew\t$x"]
+        assert _split_glued_operators(["x=kirocrew;$x", "token"]) == [
+            "x=kirocrew",
+            ";",
+            "$x",
+            "token",
+        ]
+        assert is_denied("x=kirocrew;$x token") is not None
+        # A top-level glued run whose quoted value carries a space still
+        # resolves through the pieces -- and so does one whose unquoted
+        # non-breaking space shlex never split on.
+        assert is_denied('X="a b";Y=kirocrew;$Y token') is not None
+        assert is_denied("X=a\u00a0b;Y=kirocrew;$Y token") is not None
+        # A quoted kill target reaches the kill check whole, not as a shredded pair
+        # -- the same refusal the unshredded target already meets.
+        assert is_denied("pkill -f 'x=pkill; $x -f kirocrew'") is not None
+        assert is_denied("pkill -f 'KIROCREW_PORT=6777 npm run dev'") is not None
+        assert is_denied("pkill -f 'v=6777; KIROCREW_PORT=$v npm run dev'") is not None
+        assert is_denied("pkill -f 'v=6777; PORT=$v npm run dev'") is None
+        # A guarded reassignment does not hide a KILL program any more than it
+        # hides the cli: by name, and by pid through a substitution.
+        assert is_denied("x=pkill || x=echo; $x -f kirocrew") is not None
+        assert is_denied("x=pkill && x=echo; $x -f kirocrew") is not None
+        assert is_denied("x=killall || x=echo; $x kirocrew") is not None
+        assert is_denied("x=kill || x=echo; $x -9 $(pgrep -f kirocrew)") is not None
+        # Benign scripts stay allowed.
+        assert is_denied(f"bash -c '{long_name}=ls; ${long_name} -la'") is None
+        assert is_denied("bash -c 'x=echo; $x hello'") is None
+        # A script's own reassignment never shadows a PROTECTED outer binding:
+        # shlex dropped the quote kind, and in double quotes the outer shell
+        # expands the use before the script runs (found in review).
+        assert is_denied("x=kirocrew; eval 'x=echo; $x token'") is not None
+        assert is_denied('x=kirocrew; eval "true; x=echo; $x token"') is not None
+        assert is_denied("x=kirocrew; eval 'true; x=echo; $x token'") is not None
+        assert is_denied("x=kirocrew; bash -c 'true; x=echo; $x token'") is not None
+        assert is_denied("x=kirocrew; eval 'x=foo y=bar; $x token'") is not None
+        # An UNPROTECTED outer binding is shadowed by the script's own.
+        assert is_denied("x=ls; eval 'true; x=echo; $x token'") is None
+        assert is_denied("x=echo; eval 'true; x=kirocrew; $x token'") is not None
+        assert is_denied("x=kirocrew; eval 'x=echo; $x doctor'") is None
+        # A guarded reassignment of an unprotected value still takes effect.
+        assert is_denied("x=ls || x=echo; $x hello") is None
+        # A guarded or subshell-scoped reassignment of a VERB binding is read both
+        # ways too: the guard may skip it, so the mint verb is still live (found in
+        # review). Inside a script the same two readings apply.
+        assert is_denied("v=token; false && v=doctor; kirocrew $v") is not None
+        assert is_denied("v=token; true || v=doctor; kirocrew $v") is not None
+        assert is_denied("v=token; v=doctor | true; kirocrew $v") is not None
+        assert is_denied("v=token; v=doctor & kirocrew $v") is not None
+        assert is_denied('v=token; false && v=doctor; kirocrew "$v"') is not None
+        assert is_denied("x=doctor; eval 'false && x=token; kirocrew $x'") is not None
+        assert is_denied("x=doctor; bash -c 'false && x=token; kirocrew $x'") is not None
+        # Controls: an unguarded reassignment DID run, and a guarded one over a
+        # value that mints nothing stays allowed.
+        assert is_denied("v=token; v=doctor; kirocrew $v") is None
+        assert is_denied("v=doctor; false && v=status; kirocrew $v") is None
+        assert is_denied("x=doctor; eval 'false && x=status; kirocrew $x'") is None
+        # A guarded reassignment of a protected binding is read BOTH ways: the
+        # prior may still run, and the new value may be a shell whose payload
+        # the walk must descend (``x=<cli> && x=bash`` always runs the right side).
+        assert is_denied("x=kirocrew && x=bash; $x -c 'kirocrew token'") is not None
+        assert is_denied("x=kirocrew || x=bash; $x -c 'kirocrew token'") is not None
+        assert is_denied("x=kirocrew; true && x=bash; $x -c 'kirocrew token'") is not None
+        assert is_denied("x=kirocrew; x=bash | true; $x -c 'kirocrew token'") is not None
+        assert is_denied("x=kirocrew && x=bash; $x token") is not None
+        assert is_denied("x=kirocrew && x=bash; $x -c 'echo hi'") is None
+        assert is_denied("x=ls && x=bash; $x -c 'echo hi'") is None
+        assert is_denied("x=kirocrew && x=echo; $x doctor") is None
+        assert is_denied("x=kirocrew y=1; $x token") is not None
+        assert is_denied('X="a b";Y=kirocrew;$Y doctor') is None
+        # One false-positive control per class: a leading run that rebinds to a
+        # harmless program, a subshell-scoped reassignment ahead of a verb that
+        # mints nothing, and a guarded kill program aimed at another target.
+        assert is_denied("x=kirocrew; bash -c 'y=1 x=echo; $x hello'") is None
+        assert is_denied("y=1 x=echo; $x hello") is None
+        assert is_denied("x=kirocrew; eval 'x=foo | true; $x doctor'") is None
+        assert is_denied("x=echo | true; $x hello") is None
+        assert is_denied("x=pkill || x=echo; $x -f other-app") is None
+        assert is_denied("x=pkill; x=echo; $x -f kirocrew") is None
+        # An unguarded reassignment followed by ``||`` DID run: the shell's value.
+        assert is_denied("x=pkill; x=echo || true; $x -f kirocrew") is None
+        # A redirection or a comment after a bare assignment is not a command
+        # word: the assignment stays persistent, as on main.
+        for tail in (">/dev/null", "2>/dev/null", ">>log", "<in", "&>out", "# note"):
+            assert is_denied(f"t=token {tail}; kirocrew $t") is not None, tail
+        assert is_denied("x=kirocrew >/dev/null; $x token") is not None
+        assert is_denied("x=kirocrew; x=foo true >/dev/null; $x token") is not None
+        # A prefix that is the FIRST binding of its name is inherited by the
+        # command it prefixes, so it is recorded; only a prefix that would
+        # replace a binding is skipped.
+        assert is_denied("t=token bash -c 'kirocrew $t'") is not None
+        assert is_denied("t=token eval 'kirocrew $t'") is not None
+        assert is_denied("t=token kirocrew $t") is not None
+        assert is_denied("t=doctor bash -c 'kirocrew $t'") is None
+        # An argument spelled ``y=pkill`` after the command is not a binding, so
+        # the prefix before it is still a prefix.
+        assert is_denied("x=kirocrew; eval 'x=foo true y=pkill; $x token'") is not None
+        assert is_denied("x=kirocrew; x=foo true y=pkill; $x token") is not None
+        # An unquoted use of a value that holds whitespace is word-split, so the
+        # value's first word is the program that runs -- at top level, guarded,
+        # subshell-scoped, and inside a script the outer frame reaches into.
+        assert is_denied('x="kirocrew -v"; $x token') is not None
+        assert is_denied("x='kirocrew -v'; $x token") is not None
+        assert is_denied('false || x="kirocrew -v"; $x token') is not None
+        assert is_denied('x="kirocrew -v" | true; $x token') is not None
+        assert is_denied('x="pkill -f"; $x kirocrew') is not None
+        assert is_denied("x=foo; eval 'false || x=\"kirocrew -v\"; $x token'") is not None
+        assert is_denied('x="ls -la"; $x /tmp') is None
+        # A prefix value spelled through a variable is read expanded, and a
+        # protected prefix value binds whatever it prefixes.
+        assert is_denied("x=echo; y=kirocrew; x=$y export x; $x token") is not None
+        assert is_denied("x=echo; x=kirocrew readonly x; $x token") is not None
+        assert is_denied("x=echo; y=kirocrew; eval 'x=$y export x; $x token'") is not None
+        assert is_denied("x=echo; y=kirocrew; x=$y true; $x token") is not None
+        assert is_denied("x=echo; x=ls export x; $x -la") is None
+        # A builtin is a command word: bash scopes the prefix to it, so the binding
+        # before it stands -- for the regular builtins (``local``, ``declare``,
+        # ``typeset``, ``source``), which never persist a prefix, and for the special
+        # ones, where the scoped reading is the one that refuses.
+        for builtin in (
+            "local y",
+            "declare y",
+            "typeset y",
+            "source /dev/null",
+            "export y",
+            ". /dev/null",
+        ):
+            assert is_denied(f"x=kirocrew; x=echo {builtin}; $x token") is not None, builtin
+            assert is_denied(f"x=kirocrew; eval 'x=echo {builtin}; $x token'") is not None, builtin
+        assert is_denied("x=ls; x=echo local y; $x -la") is None
+        # The outer frame's transformed and indirect uses reach into a script too.
+        assert is_denied("k=kirocrew; eval 'true; ${k:0} token'") is not None
+        assert is_denied("k=kirocrew; eval 'true; ${k^^} token'") is not None
+        assert is_denied("n=k; k=kirocrew; eval 'true; ${!n} token'") is not None
+        # ``eval`` joins its arguments; the joined frame spans the whole token and
+        # its pieces, each read both ways after a guarded reassignment, and is
+        # still walked.
+        assert is_denied("eval 'x=1; kirocrew' token") is not None
+        assert is_denied("eval 'x=1; git' 'push origin main'") is not None
+        for filler in (23, 60, 400):
+            script = (
+                "x=kirocrew&&x=sh;echo $x; eval 'a=" + "f" * filler + "; git' 'push origin main'"
+            )
+            assert is_denied(script) is not None, filler
+            assert (
+                is_denied("x=kirocrew&&x=sh;echo $x; eval 'a=" + "f" * filler + "; git' 'status'")
+                is None
+            )
+        # Every piece the join repeats costs one space the source never carried, so
+        # a long run of separators is still inside the bound (a padded script was
+        # dropped as over-long, and the publish it carried was allowed).
+        assert is_denied("eval 'x=1; " + ":; " * 40 + "git' 'push origin main'") is not None
+        assert is_denied("eval 'x=1; " + ":; " * 40 + "echo' 'push origin main'") is None
+        # The glued spelling of a guarded reassignment reads like the spaced one.
+        assert is_denied("x=kirocrew||x=echo;$x token") is not None
+        assert is_denied("x=kirocrew&&x=echo;$x token") is not None
+        # A multiword value used as an ARGUMENT stays one word.
+        assert is_denied('m="fix kirocrew token handling"; git commit -m "$m"') is None
+        assert is_denied('m="kirocrew token"; echo "$m"') is None
+        # A protected SIBLING in a prefix run does not make the other name the
+        # script's own binding: the outer protected value still reaches the use
+        # -- and so does a persistent run, since the outer value is protected.
+        assert is_denied("x=kirocrew; eval 'x=echo y=kirocrew true; $x token'") is not None
+        assert is_denied("x=kirocrew; eval 'x=echo y=foo true; $x token'") is not None
+        assert is_denied("x=kirocrew; eval 'x=echo y=kirocrew; $x token'") is not None
+        assert is_denied("x=ls; eval 'x=echo y=kirocrew; $x token'") is None
+        # ``case`` clause terminators are command boundaries, so a reassignment in
+        # a clause body persists.
+        for term in (";;", ";&", ";;&"):
+            assert (
+                is_denied(f"t=doctor; case q in q) t=token {term} esac; kirocrew $t") is not None
+            ), term
+        assert is_denied("x=kirocrew; case q in q) x=echo ;; esac; $x token") is None
+        # A script that does not OPEN with an assignment still reads its own
+        # bindings ahead of the outer frame's.
+        assert is_denied("x=foo; eval 'true; x=kirocrew; $x token'") is not None
+        assert is_denied("x=foo; bash -c 'true; x=kirocrew; $x token'") is not None
+        assert is_denied("x=foo; eval 'true && x=kirocrew; $x token'") is not None
+        assert is_denied("x=kirocrew; eval 'true; $x token'") is not None
+        assert is_denied("x=foo; eval 'true; x=echo; $x hello'") is None
+        # A separator INSIDE a quote the script still carries is data: the text after
+        # it is the rest of a word, not an assignment, so the outer binding still
+        # reaches the use -- in the whole-script frame and in the glued pieces.
+        assert is_denied('x=kirocrew; eval \'printf "%s" "; x=echo"; $x token\'') is not None
+        assert is_denied('x=kirocrew; bash -c \'printf "%s" "; x=echo"; $x token\'') is not None
+        assert is_denied("x=kirocrew; eval \"printf '%s' '; x=echo'; \\$x token\"") is not None
+        assert is_denied("x=pkill; eval 'echo \"; x=echo\"; $x -f kirocrew'") is not None
+        assert is_denied('x=kirocrew; eval \'y=1;printf "%s" ";x=echo"\'; $x token') is not None
+        # An UNCLOSED quote reads the rest of the script as data.
+        assert is_denied("x=kirocrew; eval 'echo \"; x=echo; $x token'") is not None
+        # A quoted separator in ordinary data, and a REAL reassignment after one.
+        assert is_denied('m="a; b"; eval \'printf "%s" "$m"; echo ok\'') is None
+        assert is_denied('x=1;eval \'printf "%s" "a;b"\';echo $x') is None
+        assert is_denied('x=ls; eval \'x=echo; printf "%s" "; a"; $x token\'') is None
+
+    def test_a_variable_push_target_inside_a_carrier_is_refused_like_the_top_level_spelling(
+        self,
+    ) -> None:
+        """A push whose destination is an expansion is refused wherever the shell runs it.
+
+        The publish floor refuses ``b=<branch>; git push origin $b`` at top
+        level: the destination cannot be determined through ``$b`` before the
+        push runs, so the push is refused for a feature branch and a protected
+        branch alike.  Inside a carrier the same command was ALLOWED, because
+        the quoted script was shredded at its inner ``;`` in the outer frame
+        and ``git push origin $b`` never reached the floor as a command line --
+        a bypass of the floor, not a narrower rule.  The script is now walked
+        whole, so the payload spelling meets the floor the top-level spelling
+        already meets, with and without ``-u``.
+        """
+        from kiro_crew.security import is_denied
+
+        for branch in ("feat/example", "main"):
+            assert is_denied(f"b={branch}; git push origin $b") is not None, branch
+            for cmd in (
+                f"bash -c 'b={branch}; git push origin $b'",
+                f"bash -c 'b={branch}; git push -u origin $b'",
+            ):
+                assert is_denied(cmd) is not None, cmd
+        # The literal feature-branch push stays allowed in both frames.
+        assert is_denied("git push origin feat/example") is None
+        assert is_denied("bash -c 'true; git push origin feat/example'") is None
+
     def test_referenced_splits_keep_the_candidate_set_bounded(self) -> None:
         """Finding splits by reference is bounded by the references, not the ``c`` count.
 
         The ~3 KB alternating ``-acac…`` token (the shape that made the
         candidate set quadratic and outlived the loop watchdog) yields the
-        same bounded set as before; a payload that references k distinct
-        region suffixes adds at most k candidates and needs k*(k+1)/2
-        characters to do so.
+        same bounded set as before, and a payload that refers back to k
+        distinct region suffixes buys NO further candidate: an earlier round
+        yielded one per referenced suffix, which cost the attacker k*(k+1)/2
+        characters for k full-length frames -- O(n^1.5) (found in review).
+        The glued name is read by the resolver instead.
         """
         from kiro_crew.security import _shell_c_carrier_payloads
 
@@ -9719,7 +10055,9 @@ class TestGluedShellCommandPayloadExtraction:
         assert len(flooded) <= 70, len(flooded)
         refs = [f"${'ac' * k}" for k in range(1, 55)]
         adversary = "-c" + "ac" * 1600 + "=x; " + " ".join(refs)
-        assert len(_shell_c_carrier_payloads(adversary)) <= len(flooded) + len(refs)
+        assert len(_shell_c_carrier_payloads(adversary)) <= len(flooded)
+        many = " ".join("$" + "c" * k for k in range(64, 64 + 390))
+        assert len(_shell_c_carrier_payloads("-" + "c" * 460 + "'echo " + many + "'")) <= 3
         one_run = _shell_c_carrier_payloads("-" + "c" * 3000 + "'git push origin main'")
         assert len(one_run) <= 3, len(one_run)
 
