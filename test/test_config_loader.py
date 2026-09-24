@@ -39,6 +39,7 @@ from kiro_crew.config.loader import (
     SttConfig,
     WatchdogConfig,
     WorkspaceConfig,
+    _build_agent_config,
     _migrate_workspaces,
     _validated_stt_model,
     _validated_stt_provider,
@@ -522,6 +523,52 @@ def test_slack_home_tab_sessions_per_kind_parsed_and_round_trips():
     # Survives a to_dict() -> load() round-trip.
     reloaded = _load_from_dict(loaded.to_dict())
     assert reloaded.slack.home_tab_sessions_per_kind == 42
+
+
+class TestChatRuntimeSharingLoad:
+    """agent.chat_runtime_sharing coercion, asserted where the coercion lives.
+
+    The flag is an operator opt-in to letting two dashboard chats share one
+    process, so its failure directions are not symmetric: a malformed value that
+    reads as TRUE relaxes process isolation nobody asked to relax, while one that
+    reads as FALSE only costs a process. ``bool("false")`` is True in Python, so
+    the routine quoted-config mistake is exactly the input that would flip it on.
+
+    Asserted against ``_build_agent_config`` rather than a full load, because a
+    full load cannot see this: ``load()`` type-checks the section first and
+    replaces a string with the default (logging "type mismatch at
+    'agent.chat_runtime_sharing': expected boolean, got string"), so the quoted
+    form is already safe through config.json and every value below would read
+    False no matter how this function coerced. That makes the coercion
+    defence-in-depth for the section builder's own contract -- it takes a plain
+    dict -- and ``_safe_bool`` is the spelling this builder already uses for its
+    other bool fields.
+    """
+
+    def test_absent_and_explicit_values(self) -> None:
+        assert _build_agent_config({}).chat_runtime_sharing is False
+        assert _build_agent_config({"chat_runtime_sharing": True}).chat_runtime_sharing is True
+        assert _build_agent_config({"chat_runtime_sharing": False}).chat_runtime_sharing is False
+
+    def test_quoted_false_does_not_enable_sharing(self) -> None:
+        # The fail-open this locks shut: `bool("false")` is True, so the operator
+        # who wrote the quoted form would have had sharing switched ON.
+        assert _build_agent_config({"chat_runtime_sharing": "false"}).chat_runtime_sharing is False
+
+    def test_no_non_bool_can_enable_sharing(self) -> None:
+        # Every truthy non-bool, not just the quoted one: a bool is the only
+        # value this flag accepts, so anything else is the default.
+        for bad in ("false", "true", "yes", 1, 0, None, {}, []):
+            assert (
+                _build_agent_config({"chat_runtime_sharing": bad}).chat_runtime_sharing is False
+            ), bad
+
+    def test_a_real_opt_in_still_survives_a_round_trip(self) -> None:
+        # The control: the coercion must not have made the flag unsettable, and
+        # a real bool still reaches the config through a full load.
+        loaded = _load_from_dict({"agent": {"chat_runtime_sharing": True}})
+        assert loaded.agent.chat_runtime_sharing is True
+        assert _load_from_dict(loaded.to_dict()).agent.chat_runtime_sharing is True
 
 
 class TestSessionControlLoad:

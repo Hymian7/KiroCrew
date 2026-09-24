@@ -2300,6 +2300,15 @@ class SessionAllocationService:
                     pre_spawn = await pre_spawn_identity(
                         getattr(owner, "spawn_identity_reader", None)
                     )
+                    # The chat runtime pool refuses to demux this session onto a
+                    # process that authenticated as a different account, and this
+                    # is the read it compares with -- handed over rather than
+                    # taken again, so the gate adds no identity-store read and no
+                    # audit event to the start path. Best-effort like the stamp
+                    # below: a provider that will not carry it simply leaves the
+                    # pool's era check inert.
+                    with contextlib.suppress(Exception):
+                        provider.pre_spawn_identity = pre_spawn
                     await provider.start()
                 except (asyncio.CancelledError, Exception):
                     if preparation.revision:
