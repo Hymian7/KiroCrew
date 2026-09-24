@@ -349,6 +349,12 @@ class TestTheMigrationCommandRuns:
     because the defect these tests exist for is a string verified only where it was
     written: the POSIX one-liner reached CI and failed on Windows, where ``mkdir -p``
     and ``printf`` are not commands and POSIX quotes are not quoting characters.
+
+    The notice is deliberately NOT a runnable redirection command on any platform. A
+    ``printf ... > path`` line an operator copy-pastes follows a symlink a pre-upgrade
+    agent can plant at ``path`` (the crew data-home root is agent-writable), overwriting
+    an attacker-chosen target with operator privilege. So both renderings name the path
+    and the exact one line and ask the operator to create the file by hand.
     """
 
     def test_the_command_uses_the_resolved_path_not_an_env_var(self, crew_home):
@@ -367,31 +373,40 @@ class TestTheMigrationCommandRuns:
         notice = standing_approval.migration_notice("auto", windows=True)
         assert "mkdir -p" not in notice
         assert "printf" not in notice
-        assert "'" not in notice.split("containing this one line:")[1]
+        assert "'" not in notice.split("this one line:")[1]
         assert f'{{"{standing_approval.GRANT_FIELD}": true}}' in notice
 
-    def test_the_posix_rendering_gives_a_runnable_command(self, crew_home):
+    def test_the_posix_rendering_is_not_a_runnable_redirection(self, crew_home):
+        """The POSIX text must NOT hand the operator a ``printf ... > path`` line: a
+        copy-pasted redirection follows a symlink a pre-upgrade agent can plant at the
+        keystone path, overwriting an attacker-chosen target with operator privilege.
+        It names the path and the line for manual creation, like the Windows text.
+        """
         notice = standing_approval.migration_notice("auto", windows=False)
-        assert "mkdir -p" in notice
-        assert "printf" in notice
+        assert "printf" not in notice
+        assert ">" not in notice
+        assert "create the file" in notice
+        assert f'{{"{standing_approval.GRANT_FIELD}": true}}' in notice
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell builtins")
-    def test_running_the_posix_command_produces_a_document_that_grants(self, crew_home):
-        """End to end: extract the command from the notice, run it, read the grant back.
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX path creation")
+    def test_creating_the_named_file_by_hand_produces_a_document_that_grants(self, crew_home):
+        """End to end: the notice names the path and the exact line; creating that file
+        by hand (as the operator is told to) yields a document that grants.
 
-        This is the assertion a path-shape mistake cannot pass -- it fails if the command
-        targets the wrong directory, whatever the text looks like.
+        Deliberately does NOT extract and execute a shell command from the notice: the
+        notice emits none, precisely so a copy-pasted redirection cannot follow a
+        planted symlink. This asserts the operator's manual action grants.
         """
         notice = standing_approval.migration_notice("auto", windows=False)
         assert standing_approval.is_declared("auto") is False
-        start = notice.index("mkdir -p")
-        end = notice.index("  (then remove")
-        command = notice[start:end]
+        # The one line the notice tells the operator to put in the file.
+        document = f'{{"{standing_approval.GRANT_FIELD}": true}}'
+        assert document in notice
+        path = loader.standing_approval_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(document + "\n", encoding="utf-8")
 
-        completed = subprocess.run(["/bin/sh", "-c", command], capture_output=True, **UTF8_TEXT)
-
-        assert completed.returncode == 0, completed.stderr
-        assert loader.standing_approval_path().is_file()
+        assert path.is_file()
         assert standing_approval.is_declared("auto") is True
 
     def test_the_default_rendering_follows_the_host(self, crew_home):
@@ -697,7 +712,8 @@ class TestTheNoticeMatchesTheMask:
 
     def test_a_maskable_host_gets_the_posix_remedy(self, crew_home):
         text = standing_approval.migration_notice("auto", masked=True, windows=False)
-        assert "mkdir -p" in text
+        assert "create the file" in text
+        assert "printf" not in text
         assert "UNAVAILABLE" not in text
 
     def test_a_maskable_host_gets_the_windows_wording(self, crew_home):
@@ -719,5 +735,5 @@ class TestTheNoticeMatchesTheMask:
         monkeypatch.setattr(sandbox, "kiro_internal_sandbox_enabled", lambda: False)
         monkeypatch.setattr(platform_compat, "IS_WINDOWS", False)
         monkeypatch.setattr(platform_compat, "IS_MACOS", False)
-        assert "mkdir -p" in standing_approval.migration_notice("auto", windows=False)
+        assert "create the file" in standing_approval.migration_notice("auto", windows=False)
         assert "UNAVAILABLE" in standing_approval.migration_notice("off", windows=False)
