@@ -24,8 +24,15 @@ const {
   parseRemoteCrewFields,
   saveRemoteCrewConfig,
 } = require("./remote-crew-setup");
-const { getRemoteHostConfig, setRemoteHostConfig } = require("./host-config");
-const { defaultedPort } = require("./gateway-auth-hint");
+const {
+  getRemoteHostConfig,
+  getRemoteHostConfigForUrl,
+  getRemoteHostDefaultNameForUrl,
+  isSelectablePort,
+  retireLegacyEmptyPortHost,
+  setRemoteHostConfig,
+} = require("./host-config");
+const { defaultedPort, portIsSchemeDefault } = require("./gateway-auth-hint");
 const { openPathHardened } = require("./open-path");
 const { DEFAULT_REMOTE_BIN, DEFAULT_REMOTE_PATH } = require("./remote-token");
 const { identityFamily } = require("./instance-guard");
@@ -228,10 +235,15 @@ function createWindowLifecycle(options) {
   // property is `""`, the lookup asks for `remoteHosts[""]`, misses, and a
   // tunnelled crew reads as a gateway on this machine -- after which the
   // heartbeat sends this machine's internal secret over that tunnel.
+  //
+  // The lookup goes through `getRemoteHostConfigForUrl` rather than the port
+  // alone so a crew an older version recorded UNDER that empty key still reads
+  // as remote. Resolving the key without honouring those records would turn a
+  // store that was safe by accident into the exposure above.
   function isGatewayLocalForWindow(win) {
     if (!win || win.isDestroyed() || !win._mcBackendUrl) return false;
     const url = win._mcBackendUrl;
-    return isLoopbackUrl(url) && !getRemoteHostConfig(store, defaultedPort(url))?.host;
+    return isLoopbackUrl(url) && !getRemoteHostConfigForUrl(store, url)?.host;
   }
 
   function setupWindowContents(win, windowBackendUrl) {
@@ -335,7 +347,11 @@ function createWindowLifecycle(options) {
     win.webContents = view.webContents;
 
     function applyTitle() {
-      const remoteName = getRemoteHostConfig(store, windowPort)?.defaultName;
+      // Resolve the name through the URL so a title an older version pinned under
+      // the empty key on a scheme-default port still renders until the record is
+      // retired onto the resolved key. Reading `getRemoteHostConfig(store,
+      // windowPort)` alone would miss it and the suffix would revert to `[:80]`.
+      const remoteName = getRemoteHostDefaultNameForUrl(store, windowBackendUrl);
       if (!IS_WIN) {
         const suffix = customName || remoteName || `[:${windowPort}]`;
         win.setTitle(`Kiro Crew ${suffix}`);
@@ -843,7 +859,10 @@ function createWindowLifecycle(options) {
     // scheme-default port, so the two would disagree on :80 and a crew the user
     // configured here would classify as a gateway on this machine.
     const focusedPort = defaultedPort(focused._mcBackendUrl);
-    const config = getRemoteHostConfig(store, focusedPort);
+    // Read through the resolver so a crew an older version left under the empty
+    // key pre-fills this form: stating it again is what moves the record onto
+    // the resolved key, and the write below retires the old one.
+    const config = getRemoteHostConfigForUrl(store, focused._mcBackendUrl);
     const currentHost = config?.host || "";
     const currentBin = config?.binPath || DEFAULT_REMOTE_BIN;
     const currentRemotePort = config?.remotePort || "";
@@ -908,10 +927,26 @@ function createWindowLifecycle(options) {
         if (fields) {
           const { host } = fields;
           const parent = focused && !focused.isDestroyed() ? focused : null;
+          // A record an older version left under the empty key is superseded by
+          // what the user states here, but only ONCE that statement is durable.
+          // Retiring first would erase the record on a write that is refused --
+          // and `saveRemoteCrewConfig` refuses an unselectable port outright, so
+          // on an http window whose port resolves to 80 no write can ever
+          // succeed. The crew would then read as a gateway on this machine, with
+          // no way back, which is the exposure this whole change closes.
+          //
+          // Only a URL whose port is its scheme's default could have produced
+          // that record, so a window on any other port leaves it alone.
+          const retireLegacy = () => {
+            if (portIsSchemeDefault(focused._mcBackendUrl)) {
+              retireLegacyEmptyPortHost(store, focusedPort);
+            }
+          };
           if (!host) {
             // Clearing belongs to this surface: the shared writer stores a crew
             // and refuses an empty host.
             setRemoteHostConfig(store, focusedPort, {});
+            retireLegacy();
             const cleared = `Remote host for :${focusedPort} cleared (using local token)`;
             console.log(cleared);
             dialog.showMessageBox(parent, { message: cleared, type: "info" });
@@ -926,6 +961,7 @@ function createWindowLifecycle(options) {
             });
             return;
           }
+          retireLegacy();
           const message = `Remote host for :${focusedPort} set to ${host}`;
           console.log(message);
           dialog.showMessageBox(parent, { message, type: "info" });
@@ -952,14 +988,46 @@ function createWindowLifecycle(options) {
       win.webContents.loadURL(`${targetUrl}?token=${tokenValue}`);
       return;
     }
-    const config = getRemoteHostConfig(store, targetPort);
+    // Resolver, not the port alone: a crew an older version left under the empty
+    // key is still the crew this tab reaches, and saying none is configured
+    // would send the reader to a form that shows the host they already set.
+    const config = getRemoteHostConfigForUrl(store, targetUrl);
     dialog.showMessageBox(win, {
       type: "warning",
       title: "Token Refresh",
       message: "Could not fetch a fresh token.",
-      detail: config?.host
-        ? `SSH to ${config.host} failed.\n\n${sshError || "Check your connection."}`
-        : "No remote host configured for this tab. Use 'Set Remote Host…' from the Tab menu.",
+      // Three states, not two. `fetchRemoteToken` keys its own lookup by port, so
+      // on a record this resolver reached under the empty key it returns without
+      // running ssh at all -- and reporting that as "SSH failed" describes an
+      // attempt that never happened and sends the reader to check a connection
+      // nothing used.
+      //
+      // On the crew-configured branch the remedy depends on whether the tab's
+      // own port can hold a crew at all. `isSelectablePort` gates on
+      // `Number.isInteger`, and `defaultedPort` returns a STRING, so the port is
+      // coerced with `Number(...)` before the test -- passing the raw string
+      // makes the predicate always false and sends every port down the
+      // unselectable branch.
+      //
+      // On an unselectable port (http :80) `saveRemoteCrewConfig` refuses every
+      // Save, so re-entering the host cannot help. But the remedy must NOT be
+      // Clear: on a live `ssh -L 80:` tunnel the crew record is the only thing
+      // marking this window remote, and clearing it makes `isGatewayLocalForWindow`
+      // read the still-open loopback window as a gateway on THIS machine -- after
+      // which the idle heartbeat puts `X-Internal-Secret` through the tunnel,
+      // which is the exact exposure this change closes. So direct the user to
+      // reopen the crew on a selectable port instead, leaving the record intact.
+      detail: sshError
+        ? `SSH to ${config?.host || "the remote host"} failed.\n\n${sshError}`
+        : config?.host
+          ? isSelectablePort(Number(targetPort))
+            ? `No token could be fetched for ${config.host}, and no SSH attempt was made.`
+              + " Re-enter the host with 'Set Remote Host…' from the Tab menu so it's"
+              + " saved for this tab."
+            : `No token could be fetched for ${config.host}. This tab's port (${targetPort})`
+              + " can't hold a remote crew, so a new host can't be saved here. Close this"
+              + " tab and reopen the crew on another port."
+          : "No remote host configured for this tab. Use 'Set Remote Host…' from the Tab menu.",
     });
   }
 
