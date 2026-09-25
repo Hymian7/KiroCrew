@@ -1,5 +1,7 @@
 "use strict";
 
+const { defaultedPort } = require("./gateway-auth-hint");
+
 /**
  * Borrow the gateway session the MAIN WINDOW already established, for
  * Mochi's poller — a plain Node process in the main process with no browser
@@ -31,12 +33,12 @@
  */
 async function borrowSessionToken({ electronSession, backendUrl }) {
   if (!electronSession || typeof electronSession.cookies?.get !== "function") return "";
-  let port;
-  try {
-    port = new URL(backendUrl).port;
-  } catch {
-    return "";
-  }
+  // `defaultedPort`, not `URL.port`: the cookie is named `mc_token_<port>` after
+  // the port the BROWSER reached, and the gateway falls back to its own listen
+  // port when the Host header carries none -- which is exactly what a browser
+  // sends for a scheme default. A raw `URL.port` is "" there, so the lookup
+  // would ask for `mc_token_` and borrow nothing on a gateway on :80.
+  const port = defaultedPort(backendUrl);
   if (!port) return "";
   try {
     const cookies = await electronSession.cookies.get({ url: backendUrl, name: `mc_token_${port}` });

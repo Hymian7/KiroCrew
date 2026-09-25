@@ -25,6 +25,7 @@ const {
   saveRemoteCrewConfig,
 } = require("./remote-crew-setup");
 const { getRemoteHostConfig, setRemoteHostConfig } = require("./host-config");
+const { defaultedPort } = require("./gateway-auth-hint");
 const { openPathHardened } = require("./open-path");
 const { DEFAULT_REMOTE_BIN, DEFAULT_REMOTE_PATH } = require("./remote-token");
 const { identityFamily } = require("./instance-guard");
@@ -221,14 +222,20 @@ function createWindowLifecycle(options) {
   // window must not read the primary's config). Shared by the host-presence
   // heartbeat and the wsl:detect sender gate so the two security decisions
   // cannot drift apart.
+  //
+  // The key comes from `defaultedPort`, not `URL.port`, because the URL API
+  // leaves a scheme's default port empty: on `http://localhost:80` the raw
+  // property is `""`, the lookup asks for `remoteHosts[""]`, misses, and a
+  // tunnelled crew reads as a gateway on this machine -- after which the
+  // heartbeat sends this machine's internal secret over that tunnel.
   function isGatewayLocalForWindow(win) {
     if (!win || win.isDestroyed() || !win._mcBackendUrl) return false;
     const url = win._mcBackendUrl;
-    return isLoopbackUrl(url) && !getRemoteHostConfig(store, new URL(url).port)?.host;
+    return isLoopbackUrl(url) && !getRemoteHostConfig(store, defaultedPort(url))?.host;
   }
 
   function setupWindowContents(win, windowBackendUrl) {
-    const windowPort = new URL(windowBackendUrl).port;
+    const windowPort = defaultedPort(windowBackendUrl);
     let customName = null;
 
     const view = new WebContentsView({
@@ -831,7 +838,11 @@ function createWindowLifecycle(options) {
   async function promptRemoteHost() {
     const focused = BaseWindow.getFocusedWindow() || mainWindow;
     if (!focused || focused.isDestroyed() || !focused._mcBackendUrl) return;
-    const focusedPort = new URL(focused._mcBackendUrl).port;
+    // Keyed with `defaultedPort` so the entry this form WRITES lands under the
+    // same key `isGatewayLocalForWindow` READS. A raw `URL.port` is "" on a
+    // scheme-default port, so the two would disagree on :80 and a crew the user
+    // configured here would classify as a gateway on this machine.
+    const focusedPort = defaultedPort(focused._mcBackendUrl);
     const config = getRemoteHostConfig(store, focusedPort);
     const currentHost = config?.host || "";
     const currentBin = config?.binPath || DEFAULT_REMOTE_BIN;
@@ -929,7 +940,7 @@ function createWindowLifecycle(options) {
     const win = BaseWindow.getFocusedWindow() || mainWindow;
     if (!win || win.isDestroyed() || !win._mcBackendUrl) return;
     const targetUrl = win._mcBackendUrl;
-    const targetPort = new URL(targetUrl).port;
+    const targetPort = defaultedPort(targetUrl);
 
     let tokenValue = await fetchLocalToken(targetUrl);
     let sshError = null;

@@ -69,3 +69,55 @@ test("defaultedPort returns '' for an unparseable URL rather than guessing", () 
     assert.equal(defaultedPort(bad), "", String(bad));
   }
 });
+
+// ── No shell module may read a port off a URL without this normalizer ───────
+
+test("no shell module keys anything off the raw URL.port property", () => {
+  // `URL.port` is "" for a scheme's default, so a port-keyed lookup written with
+  // the raw property misses on :80 and :443. One of those keys the remote-host
+  // map that decides whether a window's gateway runs on this machine, and the
+  // host-presence heartbeat sends this machine's internal secret whenever that
+  // answer is "local" -- so a tunnelled crew read as local receives the secret.
+  //
+  // The fix is a property of the whole shell rather than of the sites that
+  // happened to be found, so this sweeps every module instead of a list that a
+  // new consumer can be added outside of.
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const root = path.join(__dirname, "..");
+
+  // `data-home.js` reads the port out of a stored `dashboard.url` to pick a
+  // LAUNCH TARGET, not to key a lookup. Resolving a scheme default there would
+  // newly admit :80 as a target, which `isSelectablePort` in host-config.js
+  // exists to refuse -- so that decision belongs with port selection.
+  const ALLOWED = new Set(["data-home.js"]);
+
+  const offenders = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules" || entry.name === "test" || entry.name === "dist") continue;
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".js")) continue;
+      const rel = path.relative(root, full);
+      if (ALLOWED.has(rel)) continue;
+      // Strip comments first: a module is allowed to DESCRIBE the erasure, and
+      // host-config.js does exactly that where it refuses to select port 80.
+      const code = fs.readFileSync(full, "utf8")
+        .replace(/\r\n/g, "\n")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+      if (/new URL\([^)]*\)\s*\.port\b/.test(code)) offenders.push(rel);
+    }
+  };
+  walk(root);
+
+  assert.deepEqual(
+    offenders,
+    [],
+    "read the port with defaultedPort(url) instead of new URL(url).port",
+  );
+});

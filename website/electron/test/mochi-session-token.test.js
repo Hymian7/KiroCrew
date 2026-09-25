@@ -25,6 +25,33 @@ describe("borrowSessionToken", () => {
     assert.deepEqual(seen, [{ url: "http://localhost:5476", name: "mc_token_5476" }]);
   });
 
+  it("names the cookie after a scheme's default port instead of an empty one", async () => {
+    // The gateway names the cookie `mc_token_<port>` after the port the browser
+    // reached, falling back to its own listen port when the Host header carries
+    // none -- which is what a browser sends for a scheme default. `URL.port` is
+    // "" there, so the raw property asked for `mc_token_` and borrowed nothing.
+    for (const [backendUrl, expected] of [
+      ["http://localhost:80", "mc_token_80"],
+      ["http://localhost", "mc_token_80"],
+      ["https://localhost", "mc_token_443"],
+      ["https://127.0.0.1:443", "mc_token_443"],
+      ["http://localhost:5476", "mc_token_5476"],
+    ]) {
+      const seen = [];
+      const electronSession = {
+        cookies: {
+          get(filter) {
+            seen.push(filter.name);
+            return Promise.resolve([{ name: filter.name, value: "v" }]);
+          },
+        },
+      };
+      const token = await borrowSessionToken({ electronSession, backendUrl });
+      assert.deepEqual(seen, [expected], backendUrl);
+      assert.equal(token, "v", backendUrl);
+    }
+  });
+
   it("returns empty when no session was ever established (no matching cookie)", async () => {
     const electronSession = { cookies: { get: () => Promise.resolve([]) } };
 

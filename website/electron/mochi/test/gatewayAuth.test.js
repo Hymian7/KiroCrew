@@ -34,6 +34,11 @@ test("withGatewayAuth delivers a cookie-sourced credential as a Cookie header, n
     /headers: \{ Cookie: `mc_token_\$\{port\}=\$\{auth\.value\}` \}/.test(body),
     "a viaCookie credential must be sent as an mc_token_<port> Cookie header",
   );
+  assert.ok(
+    /const port = defaultedPort\(url\)/.test(body),
+    "the cookie's port must come from defaultedPort: URL.port is \"\" on a scheme "
+      + "default, which would send mc_token_= and be ignored by the gateway",
+  );
   // The cookie branch must return before falling into the query-append path.
   const cookieBranch = body.indexOf("if (auth.viaCookie)");
   const queryAppend = body.indexOf("token=${encodeURIComponent");

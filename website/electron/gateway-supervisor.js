@@ -1828,7 +1828,7 @@ function createGatewaySupervisor({
       for (let attempt = 0; ; attempt += 1) {
         let token = await fetchLocalToken(targetBackendUrl);
         if (!token) {
-          ({ token } = await fetchRemoteToken(new URL(targetBackendUrl).port));
+          ({ token } = await fetchRemoteToken(defaultedPort(targetBackendUrl)));
         }
         if (window.isDestroyed()) return;
 

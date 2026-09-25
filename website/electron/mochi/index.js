@@ -15,6 +15,7 @@ const http = require("http");
 const { app, ipcMain } = require("electron");
 const Store = require("electron-store");
 const { seedRenamedStore } = require("../store-rename");
+const { defaultedPort } = require("../gateway-auth-hint");
 const { parseMochiEnabled, remoteEnabledState, hostDisabledMeansTeardown } = require("./instanceGate");
 const {
   SELF_INSTANCE,
@@ -128,7 +129,10 @@ async function gatewayToken() {
 function withGatewayAuth(url, auth) {
   if (!auth || !auth.value) return { url, headers: {} };
   if (auth.viaCookie) {
-    const port = new URL(url).port;
+    // `defaultedPort` so a gateway on a scheme-default port names the cookie the
+    // gateway itself named it: a raw `URL.port` is "" on :80, which would send
+    // `mc_token_=` and be ignored.
+    const port = defaultedPort(url);
     return { url, headers: { Cookie: `mc_token_${port}=${auth.value}` } };
   }
   const sep = url.includes("?") ? "&" : "?";

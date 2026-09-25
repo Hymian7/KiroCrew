@@ -52,14 +52,14 @@ function legacyMigrationPort({ envPort, configuredPort }) {
  *
  * The shell reaches its gateway over `http://localhost:<port>`, and
  * `new URL("http://localhost:80").port` is `""` -- the URL API strips a scheme's
- * default port. Every per-port lookup that derives its key from that URL then
- * misses: `isGatewayLocalForWindow` reads `remoteHosts[""]`, finds no host, and
- * reports a tunnelled crew as a gateway on this machine, after which the
- * host-presence heartbeat sends this machine's internal secret over the tunnel.
+ * default port. A per-port lookup keyed off that raw property therefore misses,
+ * which is why every such lookup normalizes through `defaultedPort` first.
  *
- * The classifier is where that belongs fixed, and it is wrong on port 80
- * independently of this module. Until it is, selecting 80 from stored config is
- * a target this app cannot classify, so it is not offered.
+ * The port stays unselectable because the erasure is a property of the URL API
+ * rather than of any one call site: a target whose port does not survive the
+ * round trip through the URL the shell builds is one more place for a future
+ * lookup to read the empty key, and the consequence there is a tunnelled crew
+ * classified as a gateway on this machine. So 80 is not offered.
  */
 const UNSELECTABLE_PORT = 80;
 

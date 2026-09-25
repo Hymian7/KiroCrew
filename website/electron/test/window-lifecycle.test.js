@@ -15,6 +15,8 @@ const SOURCE = fs.readFileSync(MODULE_PATH, "utf8").replace(/\r\n/g, "\n");
 const RUNTIME_DIR = path.join(__dirname, "..", "runtime", "window");
 const PANELS_SOURCE = fs.readFileSync(path.join(RUNTIME_DIR, "browser-panels.js"), "utf8")
   .replace(/\r\n/g, "\n");
+const PROMPTS_SOURCE = fs.readFileSync(path.join(RUNTIME_DIR, "prompts.js"), "utf8")
+  .replace(/\r\n/g, "\n");
 const {
   BROWSER_PARTITION,
   createWindowLifecycle,
@@ -291,9 +293,118 @@ describe("local gateway ownership policy", () => {
       _mcBackendUrl: "http://localhost:6123",
     }), true, "an unconfigured loopback port is local");
   });
+
+  it("resolves a scheme's default port before the remote-host lookup", () => {
+    // `new URL("http://localhost:80").port` is "", so a lookup keyed off the raw
+    // property asks for remoteHosts[""], misses, and reports a tunnelled crew as
+    // a gateway on this machine -- after which the host-presence heartbeat sends
+    // this machine's internal secret over that tunnel. Both scheme defaults are
+    // covered, in every spelling of a loopback host the shell accepts, and in
+    // both directions so the normalizer cannot be a blanket "remote".
+    const remoteHosts = {
+      "80": { host: "crew-http.example.test" },
+      "443": { host: "crew-https.example.test" },
+      "6124": { host: "crew-explicit.example.test" },
+    };
+    const lifecycle = createWindowLifecycle(validOptions({
+      port: 5476,
+      store: { get: (key) => (key === "remoteHosts" ? remoteHosts : null) },
+    }));
+    const isLocal = lifecycle.security.isGatewayLocalForWindow;
+    const win = (url) => isLocal({ isDestroyed: () => false, _mcBackendUrl: url });
+
+    // A crew is configured on the port each URL really names, so every one of
+    // these is a tunnel and none of them is this machine.
+    for (const url of [
+      "http://localhost:80/",
+      "http://localhost/",
+      "http://127.0.0.1:80/",
+      "http://127.0.0.1/",
+      "http://[::1]:80/",
+      "http://[::1]/",
+      "http://0.0.0.0/",
+      "http://pod.localhost/",
+      "https://localhost:443/",
+      "https://localhost/",
+      "https://127.0.0.1/",
+      "https://[::1]/",
+      // Cross-scheme: 80 is not https's default and 443 is not http's, so the
+      // raw property already carried these. They must not change.
+      "https://localhost:80/",
+      "http://localhost:443/",
+      "http://localhost:6124/",
+    ]) {
+      assert.equal(win(url), false, `${url} names a configured crew, so it is remote`);
+    }
+
+    // The same normalization must not invent a crew where none is configured:
+    // with the default-port entries removed, a default-port URL is local again.
+    const bare = createWindowLifecycle(validOptions({
+      port: 5476,
+      store: { get: (key) => (key === "remoteHosts" ? { "6124": { host: "c.example.test" } } : null) },
+    }));
+    const bareIsLocal = bare.security.isGatewayLocalForWindow;
+    for (const url of [
+      "http://localhost:80/",
+      "http://localhost/",
+      "https://localhost:443/",
+      "https://localhost/",
+      "http://localhost:5476/",
+    ]) {
+      assert.equal(
+        bareIsLocal({ isDestroyed: () => false, _mcBackendUrl: url }),
+        true,
+        `${url} has no configured crew, so it is this machine`,
+      );
+    }
+
+    // A non-loopback host stays remote whatever its port resolves to.
+    for (const url of ["http://crew.example.test/", "https://crew.example.test:443/"]) {
+      assert.equal(win(url), false, `${url} is not loopback`);
+    }
+  });
 });
 
 describe("window lifecycle source contracts", () => {
+  it("keys the remote-host writes with the same port the local-gateway gate reads", () => {
+    // The gate and the forms that write `remoteHosts` must agree on the key, or
+    // a crew the user records here classifies as a gateway on this machine. They
+    // agree by both taking their port from the window's own backendUrl through
+    // the normalizer, so pin that each of the three sites does.
+    //
+    // The rename dialog's body moved into `renameFocusedWindow` in
+    // runtime/window/prompts.js when the modal prompts were extracted; the
+    // facade's `renameCurrentWindow` now just delegates to it. Pin the
+    // invariant where the code lives.
+    const start = SOURCE.indexOf("function promptRemoteHost(");
+    assert.notEqual(start, -1, "promptRemoteHost must exist");
+    const body = SOURCE.slice(start, SOURCE.indexOf("\n  }\n", start));
+    assert.match(
+      body,
+      /defaultedPort\(focused\._mcBackendUrl\)/,
+      "promptRemoteHost must key remoteHosts by the window's own normalized port",
+    );
+    const renameStart = PROMPTS_SOURCE.indexOf("function renameFocusedWindow(");
+    assert.notEqual(renameStart, -1, "renameFocusedWindow must exist in prompts.js");
+    const renameBody = PROMPTS_SOURCE.slice(
+      renameStart,
+      PROMPTS_SOURCE.indexOf("\n  }\n", renameStart),
+    );
+    assert.match(
+      renameBody,
+      /defaultedPort\(focused\._mcBackendUrl\)/,
+      "renameFocusedWindow must key remoteHosts by the window's own normalized port",
+    );
+    const gateStart = SOURCE.indexOf("function isGatewayLocalForWindow(");
+    assert.notEqual(gateStart, -1);
+    const gate = SOURCE.slice(gateStart, SOURCE.indexOf("\n  }\n", gateStart));
+    assert.match(
+      gate,
+      /getRemoteHostConfig\(store, defaultedPort\(url\)\)/,
+      "the gate must read remoteHosts by the same normalized port",
+    );
+  });
+
   it("tears command/control owners down before closing dashboard contents", () => {
     const setupStart = SOURCE.indexOf("function setupWindowContents");
     const setupEnd = SOURCE.indexOf("function applyDashboardChrome", setupStart);
