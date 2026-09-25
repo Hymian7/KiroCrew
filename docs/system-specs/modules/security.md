@@ -106,6 +106,75 @@ attacker-chosen tree while the lexical name stayed replaceable. The data home it
 its parents are deliberately not walked, because `config_dir()` documents that a symlinked
 data HOME is supported.
 
+**That pass decides ABOUT a name; the mount it protects binds an OBJECT, and the two are
+kept the same object on both sides.** The pass runs in the gateway and the mask mounts in
+the launcher child, so a name swapped between them is judged once and bound twice.
+`_pin_mount_path` resolves each mask target ONCE into an `O_PATH` descriptor, classifies it
+with `fstat` on that descriptor, and the mount takes `/proc/self/fd/<fd>` — a path that
+names the object the descriptor holds however the name reads by then. Symlinks are still
+followed at the pin, exactly as the `isdir`/`isfile` guards it replaces followed them, so a
+supported symlinked data home keeps working. Pinning alone closes only half the window:
+with the mask on the inspected object, a rename leaves the NAME reaching the racing
+writer's replacement — not a leak of what was there, a WRITABLE object at a protected name,
+which for the leaves the gateway reads back as authoritative buys forged records. So
+`_verify_masked_name` re-resolves the name after each hiding mount and REQUIRES it to reach
+that mount's stand-in. The read-only ceiling seal reaches the same invariant by the same
+step in the other direction: its remount can only name the mount its bind just created, so
+it re-resolves once and requires the object it reaches to be the object it bound.
+
+**Four refusal classes are new on the spawn path, and each fails CLOSED**: a target that
+exists and cannot be pinned (`open` denied where `stat` succeeded), a masked name that does
+not reach its stand-in afterwards, a ceiling whose identity changed between being bound
+and being sealed, and a protected target that was present pre-spawn and absent by the time
+the child mounts. That last one is decided in two places, and the split is forced rather
+than stylistic. WHICH targets were seen present is recorded by the pre-spawn passes
+themselves, at every branch where they accept an object — one they created, one already
+there, and one a concurrent creator won and they then re-validated — because those passes
+are already statting and creating off the event loop. The launcher builder is handed that
+set as DATA and probes nothing: `test_the_builder_does_not_stat_the_hidden_paths` pins that
+it must not, since on a stalled home a single probe there blocks the one loop every session,
+cron and heartbeat shares. Then the builder makes the one judgement that is purely LEXICAL —
+it subtracts any target nested under a directory the launcher masks EARLIER, because that
+parent's empty mask is what hides the child, so the child's absence at pin time is
+ordinary and not a race. **The predicate is that distinction, not presence.** Requiring a
+nested target refuses every spawn on a host that merely has the parent store, and no
+filesystem answer can tell the two absences apart — only the path relationship can. A
+target NOT in that set, or one holding the other kind of
+object, still SKIPS as the plain guards did — every caller-supplied path is offered to both
+the directory loop and the file loop and each takes its own kind, and requiring the whole
+list would fail every spawn on a host that simply does not use one of those tools. **The
+requirement covers ABSENCE only, and that separation is load-bearing rather than tidy.**
+Several established targets are regular files that also travel in the directory list, so a
+requirement that refused the wrong-KIND miss too would have the directory loop kill the
+launcher over a file the file loop masks correctly — on the ordinary first spawn against a
+fresh data home, not under a race. Being established says the object is still there; it
+says nothing about which loop is meant to mask it, so only the loops' own kind test may
+answer that. `~/.ssh` is required more strictly, kind included: its enclosing guard has
+already settled both, so either miss there is a race. `sandbox_level` remains the
+deliberate opt-out for a host that cannot mount.
+
+**Documented residual: the pin FOLLOWS symlinks, so a link planted at a protected leaf is
+masked at its target while the link name stays replaceable (#13802).** `mount(2)` follows
+symlinks in its target exactly as `O_PATH` does, so mounting by name and mounting a pinned
+descriptor reach the same object here and this is inherited rather than introduced by the
+pinning — measured by comparing both resolutions' device and inode against a planted decoy.
+The name check does NOT cover it either: it re-resolves with a following `stat`, so a link
+pointing at the stand-in satisfies its identity comparison. Read that check as closing a name
+REPOINTED at another object, not a name that was a link from the start. Following is
+deliberate, because the `isdir`/`isfile` guards it replaces followed links too and a symlinked
+data home is supported. `_refuse_aliased_masked_leaves` refuses a link at every non-tolerated
+hidden leaf, so what remains is the window between that `lstat` and the child's mount; closing
+it needs an `O_NOFOLLOW` per-component descent inside the generated launcher, which cannot
+reach the `pinned_fs` helpers.
+
+**Documented residual: the write carve-out still resolves its name twice.** The
+`extra_writable_dirs` pair (bind, then remount read-write) is the one mount left on the
+by-name form. It WIDENS access inside an already-sealed subtree and degrades open by
+design, so a lost race costs an MCP probe its writable temp directory rather than exposing a
+credential, and its own `islink` refusal already rejects a link planted where the directory
+belongs. Recorded here rather than left implied, and pinned by
+`test_write_carveout_still_resolves_its_own_name_twice`.
+
 **Scope: the Linux bind-mask path only.** The pass is called from `namespace_argv`, so it
 governs the Linux namespace launcher. macOS fences the same leaves through Seatbelt subpath
 denies, which are path rules rather than mounts and hold for a name that does not exist
