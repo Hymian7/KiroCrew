@@ -807,7 +807,14 @@ _IDENTITY_GATED_APPROVAL_CALLERS = Counter(
         ("llm_helpers.py", "_resolve_permission"): 2,
         ("messaging/driver.py", "run"): 3,
         ("slack/handler.py", "handle_interaction"): 1,
-        ("slack/handler.py", "handle_message"): 4,
+        # 5, not 4: the guest tool gate's exact-name auto-approval is its own rung
+        # in the ladder and cannot reuse another rung's call site. Reviewed against
+        # the identity gate: it is the one approval site whose caller is a NON-OWNER,
+        # ``approve_tool`` runs the floor for it like any other consumer, and it now
+        # consumes the result -- a False answer writes
+        # ``OUTCOME_REJECTED_TRANSPORT_FLOOR`` and skips the tool instead of
+        # continuing as though the approval had been sent.
+        ("slack/handler.py", "handle_message"): 5,
         ("subagent.py", "_approve_and_log"): 1,
         ("task_executor.py", "execute_task"): 1,
         ("task_planner.py", "decompose"): 1,
