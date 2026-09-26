@@ -6,6 +6,9 @@
 # sees before any workflow is approved, and `code-review.yml`'s PR Hygiene job
 # fails on it, which blocks PR Readiness for every PR.
 #
+# PR_FROZEN_LINES=1 prints only the frozen goal lines instead (see the awk
+# below) and exits; intent-lock.sh hashes them, so both read one parser.
+#
 # Inputs (environment): PR_BODY (untrusted, read as data only), PR_DRAFT
 # ("true"/"false"), PR_CALLER ("fork-check" by default, "pr-hygiene" from
 # code-review.yml), GITHUB_REPOSITORY, GITHUB_OUTPUT. Writes `conclusion`
@@ -69,8 +72,11 @@ printf '%s' "${PR_BODY:-}" | tr -d '\r' > "$body_file"
 # substr/while rather than regex interval expressions, because `awk` is mawk
 # on the Ubuntu runners and its interval support is not something to bet a
 # gate on.
-headings="$(awk '
+headings="$(awk -v fz="${PR_FROZEN_LINES:-}" '
+  # fz=1: also print each frozen line as "F<TAB><line>": the Goal line, and the
+  # Why it matters / Not a goal headings and every non-blank line under them.
   {
+    raw = $0
     s = $0
     n = 0
     while (n < 3 && substr(s, 1, 1) == " ") { s = substr(s, 2); n++ }
@@ -86,8 +92,9 @@ headings="$(awk '
 
     if (open == "") {
       # An opening fence may carry an info string; a closing one may not.
-      if (mch != "") { open = mch; olen = mlen; next }
+      if (mch != "") { if (fz && sec) print "F\t" raw; open = mch; olen = mlen; next }
     } else {
+      if (fz && sec && raw ~ /[^ \t]/) print "F\t" raw
       if (mch == open && mlen >= olen && rest ~ /^[ \t]*$/) {
         open = ""; olen = 0
       }
@@ -102,17 +109,28 @@ headings="$(awk '
         h = tolower(s)
         print h
         # A subheading stays inside its section; a peer heading ends it.
-        if (hn <= 2) in_problem = (index(h, "## problem / motivation") == 1)
+        if (hn <= 2) {
+          in_problem = (index(h, "## problem / motivation") == 1)
+          sec = (index(h, "## why it matters") == 1 || index(h, "## not a goal") == 1)
+        }
       }
+      if (fz && sec) print "F\t" raw
       next
     }
 
     if (in_problem && index(tolower(s), "**goal:**") == 1) {
       if (substr(s, 10) ~ /[^ \t]/) print "goal-line"
+      if (fz) print "F\t" raw
+    } else if (fz && sec && raw ~ /[^ \t]/) {
+      print "F\t" raw
     }
   }
 ' "$body_file")"
 rm -f "$body_file"
+if [ "${PR_FROZEN_LINES:-}" = 1 ]; then
+  sed -n 's/^F	//p' <<< "$headings"
+  exit 0
+fi
 
 missing=()
 while IFS= read -r section; do
