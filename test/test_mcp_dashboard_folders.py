@@ -1891,6 +1891,8 @@ class TestAdvertisedSet:
             "session_set_model",
             "session_close",
             "session_send",
+            "session_broadcast",
+            "session_status",
             "session_read_message",
             "session_adopt",
             "session_release",
