@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ctypes
+import errno
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -235,6 +236,44 @@ def test_reap_is_skipped_when_the_supervisor_does_not_lead_its_group(tmp_path: P
             os.killpg(parent.pid, 9)
             parent.wait()
     assert verdict_file.read_text() == "alive", "supervisor reaped a group it does not lead"
+
+
+@pytest.mark.parametrize("send_result", [0, -1], ids=["sent", "errno"])
+def test_pidfd_ctypes_fallback_preserves_protocol_and_errno(
+    monkeypatch: pytest.MonkeyPatch, send_result: int
+) -> None:
+    # Keep the real fallback helpers; only libc and their stdlib boundaries are
+    # synthetic. No host descriptor is opened and no real signal can be sent.
+    fake_fd = 101
+    syscall = MagicMock(side_effect=[fake_fd, send_result])
+    cdll = MagicMock(return_value=SimpleNamespace(syscall=syscall))
+    get_errno = MagicMock(return_value=errno.EPERM)
+    strerror = MagicMock(return_value="fixture signal denied")
+    monkeypatch.setattr(supervisor, "_libc", None)
+    monkeypatch.setattr(supervisor, "ctypes", SimpleNamespace(CDLL=cdll, get_errno=get_errno))
+    # These module-local namespaces omit the optional stdlib pidfd wrappers.
+    # The shared os, signal and ctypes modules remain untouched on every host.
+    monkeypatch.setattr(supervisor, "os", SimpleNamespace(strerror=strerror))
+    monkeypatch.setattr(supervisor, "signal", SimpleNamespace())
+
+    assert supervisor._pidfd_open(_UNALLOCATABLE_PID) == fake_fd
+    if send_result < 0:
+        with pytest.raises(OSError) as failure:
+            supervisor._pidfd_send_signal(fake_fd, signal.SIGTERM)
+        assert failure.value.errno == errno.EPERM
+        assert failure.value.strerror == "fixture signal denied"
+        get_errno.assert_called_once_with()
+        strerror.assert_called_once_with(errno.EPERM)
+    else:
+        assert supervisor._pidfd_send_signal(fake_fd, signal.SIGTERM) is None
+        get_errno.assert_not_called()
+        strerror.assert_not_called()
+
+    cdll.assert_called_once_with(None, use_errno=True)
+    assert syscall.call_args_list == [
+        call(434, _UNALLOCATABLE_PID, 0),
+        call(424, fake_fd, signal.SIGTERM, None, 0),
+    ]
 
 
 def _pidfd_open_with_a_number_this_test_states(pid: int) -> int:
