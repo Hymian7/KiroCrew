@@ -2130,10 +2130,10 @@ class TelegramDispatcher:
         can list several principals': a GROUP chat gives every member one chat address
         and one session key, so a drain answering one member must leave the others'
         lines -- and the entry that is their only handle -- alone. REQUIRED and
-        keyword-only, unlike the registry transition it forwards to, which keeps a
-        default for a caller that genuinely cannot name a principal: this wrapper has
-        exactly one caller and that caller always can, so an omission is a type error
-        rather than a silent return to retiring the whole bubble.
+        keyword-only, the same way the registry transition it forwards to spells it:
+        this wrapper has exactly one caller and that caller always can name the
+        principal, so an omission is a type error rather than a silent return to
+        retiring the whole bubble.
 
         ``chat_id`` is the chat the receipt BUBBLE lives in, which the drain takes
         from the queued entry's own origin rather than from the turn that opened the
@@ -2144,7 +2144,7 @@ class TelegramDispatcher:
         """
         assert self.client is not None
         await self._queue.flip_answering_locked(
-            session_key, self._receipt_surface(chat_id, None), answered, deferred, owner
+            session_key, self._receipt_surface(chat_id, None), answered, deferred, owner=owner
         )
 
     async def _handle_dashboard(

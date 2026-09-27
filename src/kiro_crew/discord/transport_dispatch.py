@@ -1761,15 +1761,15 @@ class DiscordDispatcher:
         everyone posting in it, so a drain that answered one of them must leave the
         others' lines, and the entry that is their only handle, alone.
 
-        REQUIRED and keyword-only, unlike the registry transition it forwards to, which
-        keeps a default for a caller that genuinely cannot name a principal. This wrapper
-        has exactly one caller and that caller always can, so an omission here is a
-        mistake rather than a degradation -- and being required makes it a type error at
-        the call site instead of a silent return to retiring the whole bubble.
+        REQUIRED and keyword-only, the same way the registry transition it forwards to
+        spells it. This wrapper has exactly one caller and that caller always can name
+        the principal, so an omission here is a mistake rather than a degradation -- and
+        being required makes it a type error at the call site instead of a silent return
+        to retiring the whole bubble.
         """
         assert self.client is not None
         await self._queue.flip_answering_locked(
-            session_key, self._receipt_surface(channel_id), answered, deferred, owner
+            session_key, self._receipt_surface(channel_id), answered, deferred, owner=owner
         )
 
     def _receipt_surface(self, channel_id: str) -> ReceiptSurface:
