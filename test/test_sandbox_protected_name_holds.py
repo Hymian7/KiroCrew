@@ -57,7 +57,7 @@ TIERS = ("standard", "cc", "strict")
 #: A fix that gives a name a durable hold adds it here, and the equality
 #: assertion below then locks it: the name can never fall back to leaf-name
 #: holding without this constant being edited in the same diff.
-HELD_BY_ENCLOSING_MASK: frozenset[str] = frozenset()
+HELD_BY_ENCLOSING_MASK: frozenset[str] = frozenset({"autonudge-trust"})
 
 
 def _launcher_sets(tier: str) -> tuple[list[str], list[str]]:
@@ -308,6 +308,12 @@ class TestLeafOnlyPopulationIsRecorded:
     #: launch fingerprints; ``mcp/resolved`` holds executables substituted for an
     #: approved launch. Each sits beside writable siblings, so no parent stand-in
     #: can hold it.
+    #:
+    #: The auto-nudge arm record (``tag-grants/autonudge-trust``) is deliberately
+    #: NOT among them: it is a nested leaf inside an existing whole-directory
+    #: stand-in, so it lands in ``HELD_BY_ENCLOSING_MASK`` and costs this count
+    #: nothing. A root-level ``autonudge-trust`` leaf would add three entries per
+    #: tier and weaken the existing enclosing-directory hold.
     EXPECTED: dict[str, int] = {"standard": 250, "cc": 257, "strict": 258}
 
     @pytest.mark.parametrize("tier", TIERS)
