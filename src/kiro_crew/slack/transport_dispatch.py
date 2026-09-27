@@ -71,6 +71,14 @@ from kiro_crew.slack.renderer import PARTIAL_TURN_MARKER
 from kiro_crew.slack.renderer import SlackApprovalDecider
 from kiro_crew.slack.renderer import SlackApprovalDecider as _APPROVAL_REGISTRY
 from kiro_crew.slack.renderer import SlackRenderer
+from kiro_crew.slack.thread_parent import (
+    ThreadParent,
+    fetch_thread_parent,
+    has_prior_turns,
+    is_slack_born,
+    parent_prompt_text,
+    record_thread_parent,
+)
 from kiro_crew.stats import Stats
 
 if TYPE_CHECKING:
@@ -625,6 +633,31 @@ async def handle_message_transport(
         # X-Session-Key; one shared writer lives in messaging.identity.
         await publish_turn_identity(sessions, session_key)
 
+        # ── Thread parent, for a Slack-born session opened inside a thread ──
+        # A reply in a thread this conversation did not start -- the owner
+        # answering an agent's DM, a reply under a cron post -- otherwise opens a
+        # session knowing only the reply. Read once, on a fresh session with no
+        # prior turns; recorded BEFORE the receipt row below so the transcript
+        # shows it above the reply. See ``slack/thread_parent.py``.
+        _thread_parent: ThreadParent | None = None
+        if (
+            is_new
+            and not resumed
+            and thread_ts
+            and thread_ts != msg_ts
+            and is_slack_born(session_key)
+            and not await has_prior_turns(conversation_log, session_key)
+        ):
+            _record_parent = bool(conversation_log and not _is_slack_restricted(session_key))
+            _thread_parent = await fetch_thread_parent(
+                slack, channel, thread_ts, with_author=_record_parent
+            )
+            if _thread_parent is not None and _record_parent:
+                assert conversation_log is not None
+                await record_thread_parent(
+                    conversation_log, session_key, _thread_parent, agent=_agent
+                )
+
         # ── Conversation log: the user's turn, at RECEIPT ──
         # Recorded BEFORE the turn runs rather than alongside the reply
         # afterwards. Writing both rows at the end meant the message did not
@@ -715,6 +748,13 @@ async def handle_message_transport(
                 blocks_reads=is_thread_temporary(session_key),
                 runtime_source="slack",
                 context_provider=client,
+                thread_parent_text=(
+                    parent_prompt_text(_thread_parent) if _thread_parent is not None else None
+                ),
+                # The user's row already landed at receipt above. Without this the
+                # history fallback replays it as the thread's history, ahead of
+                # the same text as the current request.
+                exclude_last_n=1 if _logged_user_turn else 0,
             )
         else:
             full_message = text

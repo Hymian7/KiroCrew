@@ -328,6 +328,13 @@ maintenance and cannot hold the write lock during provider inference. Before a
 retry calls a provider, a committed receipt recovers a lost transcript progress
 acknowledgement and leaves later appended messages pending.
 
+Display-only rows (`history_projection.DISPLAY_ONLY_ROLES`, the `notice` role)
+never reach a consolidation or skill-detection prompt: they are drawn for the
+person reading the transcript, and the Slack thread-parent notice carries
+untrusted text. They stay in the snapshot, and a span holding nothing else
+costs no model call: a history pass marks it consolidated, while a
+skill-detection pass leaves the offset alone.
+
 The following file-oriented flow and independent writes describe V1.
 
 How a user message becomes durable memory:

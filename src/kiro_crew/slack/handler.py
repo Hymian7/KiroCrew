@@ -173,6 +173,13 @@ from kiro_crew.slack.sessions_view import (
     _collect_recent_sessions_off_loop,
     sessions_include_ended,
 )
+from kiro_crew.slack.thread_parent import (
+    fetch_thread_parent,
+    has_prior_turns,
+    is_slack_born,
+    parent_prompt_text,
+    record_thread_parent,
+)
 from kiro_crew.stats import Stats
 from kiro_crew.subagent import SubagentManager
 from kiro_crew.task import Task
@@ -3950,18 +3957,30 @@ async def handle_message(
         # Fetch thread parent message when starting a new session in an
         # existing thread (e.g. replying to a cron thread).  Gives the LLM
         # context about what started the thread without requiring manual
-        # batch_get_thread_replies.
+        # batch_get_thread_replies. This path persists the user's row only
+        # after the turn, so ``compressed`` is non-empty only when earlier
+        # turns exist. A Slack-born session also records the parent as the
+        # transcript's first row (see ``slack/thread_parent.py``).
         thread_parent_text: str | None = None
         if is_new and not resumed and thread_ts and context_builder:
             if not compressed:
-                thread_parent_text = await slack.fetch_message(channel, thread_ts)
-            if thread_parent_text:
-                thread_parent_text = redact(thread_parent_text)
-                if len(thread_parent_text) > 3000:
-                    thread_parent_text = (
-                        thread_parent_text[:3000]
-                        + "\n[truncated — use batch_get_thread_replies for full text]"
-                    )
+                _record_parent = bool(
+                    conversation_log
+                    and thread_ts != msg_ts
+                    and is_slack_born(session_key)
+                    and not _is_slack_restricted(session_key)
+                    and not await has_prior_turns(conversation_log, session_key)
+                )
+                _thread_parent = await fetch_thread_parent(
+                    slack, channel, thread_ts, with_author=_record_parent
+                )
+                if _thread_parent is not None:
+                    thread_parent_text = parent_prompt_text(_thread_parent)
+                    if _record_parent:
+                        assert conversation_log is not None
+                        await record_thread_parent(
+                            conversation_log, session_key, _thread_parent, agent=_agent
+                        )
 
         if context_builder:
             # Thread-scoped temporary mode: blocks memory reads.
