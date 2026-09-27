@@ -53,7 +53,6 @@ from kiro_crew.platform_compat import (
 )
 from kiro_crew.security import (
     DENIED_ROOT_PARTS,
-    StreamRedactor,
     get_credential_patterns,
     is_sensitive_path,
     path_contains_sensitive,
@@ -281,9 +280,18 @@ _LSOF_TIMEOUT = 4
 _PROBE_TIMEOUT = 1.5
 _START_TIMEOUT = 45
 _DEV_LOG_TAIL_CHARS = 800
-# Fixed streaming read size: memory stays bounded while the whole log passes
-# through the redactor, so a credential anchor above the retained tail is seen.
-_DEV_LOG_READ_CHUNK = 64 * 1024
+# Read at most this many bytes from the END of the log into one buffer, then
+# redact that whole buffer in a single pass. The window bounds memory yet is far
+# wider than the retained tail, so a credential whose opening anchor (e.g. a PEM
+# ``-----BEGIN ... PRIVATE KEY-----`` header) sits above the tail is still in the
+# buffer the redactor sees. A single-pass redaction has no chunk seam a secret
+# could straddle to escape scrubbing.
+_DEV_LOG_READ_WINDOW = 64 * 1024
+# PEM private-key markers for detecting a key body bisected by the window
+# start (an END with no preceding BEGIN inside the window). Mirrors the header
+# shape the redaction floor anchors on: any "-----BEGIN/END ... PRIVATE KEY-----".
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
 _STOP_GRACE = 3
 _RELAY_TIMEOUT = 30
 _WS_IDLE = 3600
@@ -691,23 +699,64 @@ class _DevProxyHandler(dev_preview.DevProxyHandlerBase):
 def _read_dev_log_tail(log: Path) -> str:
     """Return the bounded, redacted diagnostic tail of a failed dev-server launch.
 
-    The log is streamed through the redactor in fixed-size chunks so a
-    credential is scrubbed even when its opening anchor (e.g. a PEM
-    ``-----BEGIN ... PRIVATE KEY-----`` header) sits far above the retained
-    tail: only the redactor's emitted output is accumulated, and only the last
-    ``_DEV_LOG_TAIL_CHARS`` characters of it are kept, so memory stays bounded.
+    Read at most ``_DEV_LOG_READ_WINDOW`` bytes from the END of the log into one
+    buffer, redact that whole buffer in a single ``_redact_text`` pass, then keep
+    the last ``_DEV_LOG_TAIL_CHARS`` characters. The window bounds memory while
+    staying far wider than the retained tail.
+
+    When the log is larger than the window the read starts mid-file, so the
+    window's own start is UNTRUSTED: it can slice through a credential, orphaning
+    a secret's body from the opening anchor the redactor keys on. A ``-----BEGIN
+    ... PRIVATE KEY-----`` header that sat before the window leaves an anchorless
+    key body at the window start that the header-anchored redactor would miss.
+    So on a truncated read the partial first line is dropped and, if a
+    ``-----END ... PRIVATE KEY-----`` marker appears with no preceding ``BEGIN``
+    inside the window, everything up to and including that END (the bisected key
+    body) is masked before redaction. Redacting in one pass over what remains
+    leaves no boundary a secret could straddle to escape scrubbing.
     """
 
-    redactor = StreamRedactor(_redact_text)
-    tail = ""
     try:
-        with log.open("r", encoding="utf-8", errors="replace") as handle:
-            while chunk := handle.read(_DEV_LOG_READ_CHUNK):
-                tail = (tail + redactor.feed(chunk))[-_DEV_LOG_TAIL_CHARS:]
-            tail = (tail + redactor.flush())[-_DEV_LOG_TAIL_CHARS:]
+        with log.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            start = max(0, size - _DEV_LOG_READ_WINDOW)
+            handle.seek(start)
+            # Cap the read LENGTH, not just its start: a descendant that
+            # inherited the log fd can keep appending after the parent exits, so
+            # an unsized read() would follow the file to its live EOF and defeat
+            # the bound. Reading at most _DEV_LOG_READ_WINDOW bytes keeps memory
+            # bounded regardless.
+            window = handle.read(_DEV_LOG_READ_WINDOW).decode("utf-8", errors="replace")
     except OSError:
         return ""
-    return tail
+    if start > 0:
+        window = _drop_truncated_window_head(window)
+    return _redact_text(window)[-_DEV_LOG_TAIL_CHARS:]
+
+
+def _drop_truncated_window_head(window: str) -> str:
+    """Discard the untrusted head of a window that began mid-file.
+
+    The first line is partial (the read cut into it), and a ``-----END ...
+    PRIVATE KEY-----`` seen before any ``BEGIN`` means a private-key body was
+    bisected by the window start — its opening header is gone, so the
+    header-anchored redactor cannot scrub it. Drop through the partial first line
+    and, when present, through that unmatched END, so no anchorless key body
+    survives into the redacted tail.
+    """
+
+    # Drop the partial first line.
+    newline = window.find("\n")
+    if newline != -1:
+        window = window[newline + 1 :]
+    begin = _PEM_BEGIN_RE.search(window)
+    end = _PEM_END_RE.search(window)
+    # An END before any BEGIN is the tail of a key whose header the window
+    # dropped: mask through it (inclusive).
+    if end is not None and (begin is None or end.start() < begin.start()):
+        window = window[end.end() :]
+    return window
+    return _redact_text(window)[-_DEV_LOG_TAIL_CHARS:]
 
 
 def _start_dev_proc(project_id: str, root: Path) -> dict:
