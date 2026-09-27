@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+from kiro_crew import runtime_death
 from kiro_crew.config import live
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.config.sections import _clamp_pct
@@ -78,6 +79,7 @@ from kiro_crew.messaging.dispatch import (
     admit_inbound_callback,
     build_auto_approve,
     build_directive_consumer,
+    charge_turn_failure,
     consume_reinjection,
     delivery_is_muted,
     driver_turn_landed,
@@ -1239,6 +1241,11 @@ class DiscordDispatcher:
                 await self.sessions.record_failure(session_key)
             else:
                 self.sessions.record_success(session_key)
+                # Beside the counter it stands in for: a landed turn clears the
+                # shared-death streak exactly as it clears the consecutive-failure
+                # count, so the streak stays a consecutive run rather than a
+                # lifetime total whose bound is permanently tripped.
+                runtime_death.clear_shared_deaths(session_key)
             try:
                 # Loop-side: put the turn in the live dashboard window FIRST so
                 # the dashboard's own save serializes it in chronological
@@ -1391,7 +1398,18 @@ class DiscordDispatcher:
                     else MonitorDispatchResult.BUSY
                 )
             if _acquired:
-                await self.sessions.record_failure(session_key)
+                # A dying runtime reaches this generic handler as one more
+                # exception, so without the attribution question every tenant of
+                # one process charges its own breaker for a single process event.
+                # ``provider`` is the one THIS turn acquired, never a lookup made
+                # while handling the failure.
+                await charge_turn_failure(
+                    self.sessions,
+                    session_key,
+                    exc=exc,
+                    provider=provider,
+                    channel_type="discord",
+                )
                 # The turn raised ahead of the post-turn persist, so nothing above
                 # recorded it: without this the transcript holds neither the
                 # message nor the failure, while the renderer's close posts an
