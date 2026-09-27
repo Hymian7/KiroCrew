@@ -102,6 +102,36 @@ const IDENTITY_SITES = [
     code: 'const localOwner = remoteHost\n          ? "foreign"\n          : await probeGatewayPortOwner(promptPort);',
     times: 1,
   },
+  {
+    what: "successor confirm: identify who now holds the restarted app's port",
+    code: 'const owner = await probeGatewayPortOwner(expectPort);',
+    times: 1,
+  },
+  {
+    what: "successor confirm: ours (kirocrew/service) is a positive hand-over",
+    code: 'if (owner === "kirocrew" || owner === "service") return "confirm";',
+    times: 1,
+  },
+  {
+    what: "successor confirm: a foreign holder cannot become ours by waiting",
+    code: 'if (owner === "foreign") return "foreign";',
+    times: 1,
+  },
+  {
+    what: "successor confirm: the probe could not identify the holder at all",
+    code: 'if (owner === "unknown") {',
+    times: 1,
+  },
+  {
+    what: "successor poll: act on the foreign verdict the identity probe returned",
+    code: 'if (verdict === "foreign") {',
+    times: 1,
+  },
+  {
+    what: "boot reuse guard: refuse to adopt a port a foreign owner holds",
+    code: 'if (decision.action === "reuse" && localOwner === "foreign" && !remoteHost) {',
+    times: 1,
+  },
 ];
 
 // Sentinel literals that are not about a port at all. Listed, because the guard

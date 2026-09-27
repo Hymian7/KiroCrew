@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import json
 import logging
 import os
@@ -242,8 +243,49 @@ def test_pidfd_fallback_through_ctypes_signals_a_group_member(
 ) -> None:
     # Standalone CPython builds that lack os.pidfd_open are exactly the hosts that
     # motivated the fix; without the ctypes path can_reap() is False there.
+    #
+    # Decide the host's TRUE pidfd_open capability with a witness independent of
+    # the production ctypes constant, so a wrong _SYS_PIDFD_OPEN never disguises
+    # itself as an incapable host and skips the ratchet:
+    #   * stdlib os.pidfd_open present -> use it (the kernel answers directly);
+    #   * absent (wrapper-less python-build-standalone) -> issue the LITERAL
+    #     pidfd_open syscall number (434) via ctypes here in the test.
+    # Skip ONLY when that independent witness itself fails (old kernel, or seccomp
+    # refusing the syscall). On a capable host the deleted-wrapper ctypes path in
+    # _pidfd_open MUST reproduce the capability, so any failure there (e.g. a wrong
+    # _SYS_PIDFD_OPEN constant, whose ENOSYS is otherwise indistinguishable from a
+    # refusing host) FAILS the assertion below rather than skipping — the ratchet
+    # stays live on the very hosts the fallback exists for.
+    _PIDFD_OPEN_SYSCALL = 434  # same on every Linux arch; independent of production
+
+    def _host_can_pidfd_open() -> bool:
+        opener = getattr(os, "pidfd_open", None)
+        try:
+            if opener is not None:
+                os.close(opener(os.getpid()))
+                return True
+            libc = ctypes.CDLL(None, use_errno=True)
+            fd = libc.syscall(_PIDFD_OPEN_SYSCALL, os.getpid(), 0)
+            if fd < 0:
+                return False
+            os.close(fd)
+            return True
+        except OSError:
+            return False
+
+    host_can_pidfd_open = _host_can_pidfd_open()
+
     monkeypatch.delattr(os, "pidfd_open", raising=False)
     monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+
+    if not host_can_pidfd_open:
+        pytest.skip(
+            "pidfd_open is unavailable on this host (old kernel, or seccomp "
+            "refuses the syscall); the ctypes fallback cannot be exercised where "
+            "the capability itself is missing"
+        )
+    # The host CAN pidfd_open, so the ctypes fallback MUST reproduce that — any
+    # OSError here is a real fallback regression, asserted below, not skipped.
     assert supervisor.can_reap()
     child = subprocess.Popen(  # noqa: S603 - fixed argv, test-local
         [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -260,6 +302,47 @@ def test_pidfd_fallback_through_ctypes_signals_a_group_member(
         if child.returncode is None:
             child.kill()
             child.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="pidfd syscalls are Linux-only")
+def test_ctypes_pidfd_fallback_branches_are_exercised_without_the_stdlib_wrappers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Host-independent coverage of the ctypes pidfd fallback: with the stdlib
+    # wrappers deleted, _pidfd_open / _pidfd_send_signal route through _syscall,
+    # and _syscall raises OSError on a negative return. libc is faked so this
+    # holds on any host (a kernel/seccomp that refuses pidfd_open otherwise
+    # leaves these branches unrun on the very hosts they exist for).
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+
+    calls: list[tuple[object, ...]] = []
+
+    class _FakeLibc:
+        def __init__(self) -> None:
+            self.rc = 0
+
+        def syscall(self, number: int, *args: object) -> int:
+            calls.append((number, *args))
+            return self.rc
+
+    fake = _FakeLibc()
+    monkeypatch.setattr(supervisor, "_libc", fake)
+
+    # Success path: the fallback issues the pidfd_open syscall and returns its fd.
+    fake.rc = 7
+    assert supervisor._pidfd_open(4321) == 7
+    assert calls[-1][0] == supervisor._SYS_PIDFD_OPEN
+
+    # Send-signal fallback issues the send-signal syscall (return >= 0 is fine).
+    fake.rc = 0
+    supervisor._pidfd_send_signal(7, signal.SIGKILL)
+    assert calls[-1][0] == supervisor._SYS_PIDFD_SEND_SIGNAL
+
+    # A negative syscall return is raised as OSError, never swallowed.
+    fake.rc = -1
+    with pytest.raises(OSError):
+        supervisor._pidfd_open(4321)
 
 
 @reaping
