@@ -12912,6 +12912,24 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
             {"error": "not found", "code": "slot_not_found"},
             status=404,
         )
+    strict_native = "origin" in body
+    if strict_native:
+        if (
+            body["origin"] != "native"
+            or not isinstance(request_id, str)
+            or not request_id
+            or action not in ("approved", "rejected", "rejected_once")
+        ):
+            return web.json_response(
+                {"error": "invalid approval target", "code": "invalid_approval_target"}, status=400
+            )
+        # This caller displayed a native request from this exact slot. A stale
+        # card must not select a same-id coordinator or another slot's future.
+        native_future = slot._approval_futures.get(request_id)
+        if not native_future or native_future.done():
+            return web.json_response(
+                {"error": "no pending approval", "code": "approval_not_pending"}, status=404
+            )
     # Locate the slot that OWNS the pending approval future. It is usually the
     # addressed slot, but under session-sharing or a rehydrated/replaced slot the
     # future can live on a different slot object under a different key. All
@@ -12922,7 +12940,7 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
     owner = slot
     if request_id:
         fut = slot._approval_futures.get(request_id)
-        if not fut or fut.done():
+        if (not fut or fut.done()) and not strict_native:
             # The future can live on a DIFFERENT slot object only under
             # session-sharing / rehydration — i.e. a slot that resolves to the
             # SAME session identity as the addressed one. ACP request_ids are
@@ -13085,7 +13103,10 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
                     state.sessions.set_approval_policy(effective_session_key(s), "")
             state.push_slots_update()
         action = "approved"
-    resolved = action if action in ("approved", "approved_trust_reads") else "rejected"
+    resolved = (
+        action if action in ("approved", "approved_trust_reads", "rejected_once") else "rejected"
+    )
+    approved = resolved in ("approved", "approved_trust_reads")
     if not fut or fut.done():
         # Distinguish ambiguous (multiple pending) from truly empty
         if not request_id and slot._approval_futures:
@@ -13106,7 +13127,7 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
         # the cross-slot approval the session-identity owner scan above prevents.
         # State-level futures have no per-slot trust semantics, so the bool
         # coercion loses nothing.
-        if request_id and state.resolve_state_approval(request_id, resolved != "rejected"):
+        if not strict_native and request_id and state.resolve_state_approval(request_id, approved):
             return web.json_response({"ok": True})
         return web.json_response({"error": "no pending approval"}, status=404)
     fut.set_result(resolved)
@@ -13127,7 +13148,7 @@ async def api_chat_slot_approve(request: web.Request) -> web.Response:
             "approval_resolved",
             {
                 "id": request_id,
-                "approved": resolved != "rejected",
+                "approved": approved,
                 # Keys the frame for the slot-scoped WS gate (see
                 # ws_event_scope._SLOT_SCOPED_EVENTS).
                 "slot": owner.key,

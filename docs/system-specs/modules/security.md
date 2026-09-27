@@ -2515,6 +2515,31 @@ Expiry notifications are delivered via Dashboard WebSocket and Slack DM to infor
 > and the `_CHALLENGE_REDIRECT_ENABLED` gate no longer exist; do not restore
 > them on an upstream sync.
 
+**Dynamic Dashboard one-shot consent** binds registry origin, recorded session
+and request ID. The coordinator endpoint's optional `origin=coordinator&slot=…`
+selector checks the exact inventory slot and resolves only its live state future,
+without yielding between check and resolution. The native slot endpoint's optional
+`origin: native` body selector requires an explicit request ID and one-shot action;
+it never adopts another slot's future or falls back to the coordinator. Missing or
+expired targets return 404. Omitting the selector retains established behavior
+for older approval surfaces. These selectors narrow resolution, not authorization
+or permission mode; the existing caller gates still run first.
+
+The host approval card displays the redacted `tool_purpose` from that exact
+native permission event or coordinator inventory record, never a reason inferred
+from the command, title, or session task. An absent reason is explicitly missing.
+Coordinator slot projections redact the full purpose before applying the existing
+8,000-byte UTF-8 display cap, with a visible truncation notice. Native purposes
+retain their upstream cap and notice without being capped again. The display cap
+does not change the coordinator's stored request or its approval authority.
+Native `rejected_once` skips that request without rejecting the remaining tool
+batch; a coordinator refusal resolves its boolean future to false. Neither
+changes permission mode or promises that the agent continues. Copies in other
+views describe the same request and reconcile on refresh. Normal mode asks for
+tools requiring approval, not every action. Invalid strict selectors return
+`400 / invalid_approval_target`; a missing strict native future returns
+`404 / approval_not_pending` without cross-origin fallback.
+
 **3-tier interactive trust escalation** (`dashboard/chat_runner.py`, `dashboard/chat_handlers.py`):
 
 When the dashboard presents a tool approval prompt, users can now choose from three trust levels:
@@ -2716,6 +2741,12 @@ payload carries public control *definitions* and derived counts only:
   ("no control key contains `policy`") is trivially bypassed — a control keyed
   `ceiling_scopes` could republish literal policy deny globs and still pass it.
   If the module cannot *reach* governance, it cannot leak it under any key name.
+
+Automatic session cards register `dashboard/card_lifecycle.py` as an egress sink:
+the bounded transcript window crosses into a background model, and its returned
+HTML/text crosses into the owner-visible cache. Both passes redact credentials
+and exfiltration URLs before either boundary. The read-only owner GET does not
+start generation; this boundary is not a non-egress allowlist exception.
 
 **Honest per-sink coverage.** Most redaction sinks run both scanners; a few run
 only one (`task_reporter.py` is exfil-URL-only; `sel.py`'s on-disk writer signs

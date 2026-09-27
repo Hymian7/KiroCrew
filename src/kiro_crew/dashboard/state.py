@@ -2640,6 +2640,8 @@ class _ChatSlot:
         "_mcp_report",
         "_mcp_report_session_id",
         "_on_message",
+        "_on_card_event",
+        "_dashboard_card_identity",
         "_on_question_retired",
         "_coordinator_approvals",
         "_has_reader_flag",
@@ -3153,6 +3155,8 @@ class _ChatSlot:
         self._mcp_report_session_id: str = ""
         # Callback for broadcasting messages via global SSE
         self._on_message: object | None = None  # Callable[[str, dict], None] | None
+        self._on_card_event: object | None = None
+        self._dashboard_card_identity = uuid.uuid4().hex
         # Announce stateless question cards this slot retires, so every client
         # drops them: Callable[[str, list[str]], None] | None, wired by
         # DashboardState like _on_message. A retirement that only mutates state
@@ -4211,6 +4215,8 @@ class _ChatSlot:
         self._dirty = True
         self._pending.append(msg)
         self.event.set()
+        if broadcast and self._on_card_event and role in {"user", "assistant", "error", "done"}:
+            self._on_card_event(self, role)  # type: ignore[operator]
         # Broadcast via global SSE when no HTTP stream reader is active
         # Skip: chunk (too noisy), done (internal). A "user" row is skipped by
         # DEFAULT because the composer that submitted it already rendered it
@@ -5404,6 +5410,7 @@ class DashboardState:
         # hand-edited-but-typo'd column.
         self._unparsed_tag_board_entries: list[Any] = []
         self._background_tasks: set[asyncio.Task] = set()  # type: ignore[type-arg]
+        self._dynamic_cards: Any = None
         # Gateway replacement is process-wide, not an ordinary repeatable
         # background mutation.  The task latch coalesces duplicate /api/restart
         # clicks during the response-drain window; the in-progress latch also
@@ -6531,6 +6538,9 @@ class DashboardState:
             questions=questions,
             native=native,
         )
+        slot = self._slots.get(slot_key)
+        if slot is not None:
+            self.notify_dashboard_card(slot, "question")
 
     def clear_question_pending(
         self,
@@ -6918,6 +6928,7 @@ class DashboardState:
             slot.title = pretty_title
         slot._tab_id = uuid.uuid4().hex[:12]
         slot._on_message = self._broadcast_chat_message
+        slot._on_card_event = self.notify_dashboard_card
         slot._on_question_retired = self._broadcast_question_retired
         slot._coordinator_approvals = self.pending_coordinator_approvals
         slot._app = app
@@ -9172,6 +9183,8 @@ class DashboardState:
         if key in self._slots:
             self.push_slots_update()
             return
+        if self._dynamic_cards is not None:
+            self._dynamic_cards.publisher.forget(key)
         if self._has_legacy_slots_audience():
             self.push_slots_update(legacy_only=True)
         if self._has_slot_patch_clients():
@@ -9199,6 +9212,30 @@ class DashboardState:
     def _send_slot_patch(self, data: dict[str, Any]) -> None:
         """Serialize one ``slot_patch`` frame and hand it to patch-capable sockets."""
         _websocket_for(self).send_ws_slot_patch(json.dumps({"type": "slot_patch", "data": data}))
+
+    def set_dynamic_cards_enabled(self, enabled: bool) -> None:
+        """Post-bind activation; retain the producer and its budgets across toggles."""
+        if self._dynamic_cards is None:
+            if not enabled:
+                return
+            from kiro_crew.dashboard.card_lifecycle import CardLifecycle
+
+            self._dynamic_cards = CardLifecycle(self)
+        self._dynamic_cards.set_enabled(enabled)
+
+    def notify_dashboard_card(self, slot: "_ChatSlot", reason: str) -> None:
+        """Queue semantic work from a real event, never from a read/serialize."""
+        loop = self.serving_loop
+        if loop is None or loop.is_closed():
+            return
+        if loop is not self._running_loop():
+            loop.call_soon_threadsafe(self.notify_dashboard_card, slot, reason)
+            return
+        try:
+            if self._dynamic_cards is not None:
+                self._dynamic_cards.notify(slot, reason)
+        except Exception:
+            logger.debug("Dashboard card event skipped", exc_info=True)
 
     def push_session_summary(self, key: str) -> None:
         """Broadcast that a session's intent summary was regenerated.

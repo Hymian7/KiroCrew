@@ -60,6 +60,7 @@ export const SKILLS_TIMEOUT_MS = 15_000
 export const SLASH_COMMANDS_TIMEOUT_MS = 15_000
 import { installApiTransport } from './apiTransport'
 import type { SessionSummary } from '../types/sessionSummary'
+import type { DynamicDashboardCard } from '../types/dynamicDashboard'
 import {
   queryClient,
   invalidateAcrossQueryClients,
@@ -3316,6 +3317,9 @@ export const api = {
       envFile: typeof read.env_file === 'string' && read.env_file ? read.env_file : '~/.kiro/crew/.env',
     }
   },
+  /** The conductor's accepted work, not worker-reported completion. */
+  sessionWorkProjection: (slot: string) =>
+    get(`/api/sessions/${encodeURIComponent(slot)}/crew-log/projection/work`).then(j),
   telemetryStartup: () => fetch('/api/telemetry/startup').then(j),
   // Per-turn context injection breakdown for one session. Independent of the
   // telemetry main switch: the usage rows it reads are always written.
@@ -3364,6 +3368,8 @@ export const api = {
    *  error) when the feature is off, so the panel can explain itself. */
   sessionSummary: (slot: string) =>
     fetch('/api/chat/slots/' + encodeURIComponent(slot) + '/summary').then(j) as Promise<SessionSummary>,
+  dashboardCard: (slot: string) =>
+    fetch('/api/chat/slots/' + encodeURIComponent(slot) + '/dashboard-card').then(j) as Promise<DynamicDashboardCard>,
   /** Summarize this session NOW, on the person's explicit request.
    *
    *  Same path as the GET, different verb: reading a summary must stay free of
@@ -4903,8 +4909,8 @@ export const api = {
   spawnDelete: (id: string) => del('/api/spawn/' + encodeURIComponent(id)).then(j),
   spawnStopAll: (slot: string) => post('/api/spawn/stop-all', { slot }).then(j),
   spawnRetry: (id: string) => post('/api/spawn/' + encodeURIComponent(id) + '/retry', {}).then(j),
-  approvals: (): Promise<{ id: string; source?: string; tool?: string; tool_input?: string; tool_call_id?: string; slot?: string; ts?: number }[]> => fetch('/api/approvals').then(j),
-  resolveApproval: (id: string, action: 'approve' | 'reject' | 'reject_once') => post('/api/approvals/' + encodeURIComponent(id) + '/' + action, {}).then(j),
+  approvals: (): Promise<{ id: string; source?: string; tool?: string; tool_input?: string; tool_purpose?: string; tool_call_id?: string; slot?: string; ts?: number }[]> => fetch('/api/approvals').then(j),
+  resolveApproval: (id: string, action: 'approve' | 'reject' | 'reject_once', target?: { origin: 'coordinator'; slot: string }) => post('/api/approvals/' + encodeURIComponent(id) + '/' + action + (target ? '?' + new URLSearchParams(target) : ''), {}).then(j),
   /** Question cards still awaiting an answer, for rehydration after a reload or
    *  websocket reconnect (`question_card` is a one-shot broadcast). A blocking
    *  ask carries `ask_id`; a stateless card carries `card_id` instead, and

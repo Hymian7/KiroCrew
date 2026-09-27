@@ -6,6 +6,7 @@ import ast
 import asyncio
 import itertools
 import json
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -212,7 +213,12 @@ _ANSWER_POLL_SECS = 0.01
 
 
 async def _answer_approval(
-    owner: object, request_id: str, outcome: str, *, timeout: float = _ANSWER_WAIT_SECS
+    owner: object,
+    request_id: str,
+    outcome: str,
+    *,
+    timeout: float = _ANSWER_WAIT_SECS,
+    before_answer: Callable[[], None] | None = None,
 ) -> None:
     """Resolve *owner*'s approval future for *request_id* once the turn registers it.
 
@@ -228,7 +234,12 @@ async def _answer_approval(
         fut = owner._approval_futures.get(request_id)  # type: ignore[attr-defined]
         if fut is not None:
             if not fut.done():
-                fut.set_result(outcome)
+                try:
+                    if before_answer is not None:
+                        before_answer()
+                finally:
+                    # A failed observation must not leave the runner parked.
+                    fut.set_result(outcome)
             return
         assert loop.time() < deadline, (
             f"approval future {request_id!r} was never registered within "
@@ -270,6 +281,54 @@ async def _drain(task: asyncio.Task) -> None:
 
 class TestApprovalModes:
     """Verify that normal/trust/yolo modes route permission requests correctly."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "purpose", ["Inspect the isolated workspace", "", "Inspect token ghp_" + "a" * 36]
+    )
+    async def test_pending_permission_persists_its_own_redacted_purpose(self, tmp_path, purpose):
+        state, client = _make_state(tmp_path, context_builder=_context_builder())
+        slot = _make_slot()
+        slot.messages.append(
+            {
+                "role": "tool",
+                "content": "Previous tool",
+                "cls": json.dumps({"tool_purpose": "Unrelated purpose"}),
+            }
+        )
+        event = _permission_event()
+        event.tool_purpose = purpose
+        _set_stream(client, [event, _complete_event()])
+        observed = {}
+
+        async def _inspect_and_approve():
+            await _answer_approval(
+                slot,
+                "req-1",
+                "approved",
+                before_answer=lambda: observed.update(slot.to_dict()["pending_approval_info"]),
+            )
+
+        approver = asyncio.create_task(_inspect_and_approve())
+        try:
+            with _patch_stats():
+                await _run_chat(state, slot, "hello")
+            await approver
+        finally:
+            await _drain(approver)
+        permission = next(m for m in slot.messages if m.get("role") == "permission")
+        metadata = parse_cls_meta(permission["cls"])
+        assert observed["request_id"] == "req-1"
+        if purpose:
+            expected = chat_runner._redact_tool_field(purpose, limit=chat_runner._MAX_TOOL_PURPOSE)
+            assert metadata["tool_purpose"] == expected
+            assert observed["tool_purpose"] == expected
+            if "ghp_" in purpose:
+                assert "ghp_" not in expected
+        else:
+            assert not metadata.get("tool_purpose")
+            assert not observed.get("tool_purpose")
+        assert observed.get("tool_purpose") != "Unrelated purpose"
 
     @pytest.mark.asyncio
     async def test_normal_mode_prompts_interactively(self, tmp_path):

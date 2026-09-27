@@ -15189,6 +15189,10 @@ async def _run_chat(
                     "request_id": str(event.request_id),
                     "tool_call_id": event.tool_call_id or "",
                 }
+                if event.tool_purpose:
+                    perm_meta["tool_purpose"] = _redact_tool_field(
+                        event.tool_purpose, limit=_MAX_TOOL_PURPOSE
+                    )
                 if event.tool_input:
                     # Security: scan for exfiltration URLs and credentials
                     sanitized, _ = redact_exfiltration_urls(event.tool_input)
