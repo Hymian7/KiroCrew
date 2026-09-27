@@ -2472,12 +2472,33 @@ still refresh while the dashboard body is blocked. On a new gateway it:
 1. displays the connected gateway's OS so a remote browser does not imply an
    agent must be installed on the browser machine;
 2. offers the Kiro CLI card and an independent Other coding agents picker.
-   The picker reads `/api/acp/backends`, shows each harness's detected state and
+   The picker reads `/api/acp-backends`, shows each harness's detected state and
    install command, and lets the owner select a verified harness. A configured
-   usable non-KAS backend opens the dashboard without Kiro CLI or KAS ACP support;
-   shared sandbox failure still blocks every harness. KAS remains subject to
-   the Kiro ACP compatibility check. Unknown or failed probes do not claim a
-   harness is ready;
+   usable backend whose `/api/acp-backends` row advertises
+   `independent_setup=true` opens the dashboard without Kiro CLI or KAS ACP
+   support. The server sets this flag from the named independent-harness set;
+   an unknown future backend does not inherit the bypass merely because it is
+   not Kiro or KAS;
+   non-Kiro bypass also requires `sandbox_backend_available=true`, detected
+   off-loop from Crew's OS sandbox backend even when no Kiro CLI candidate
+   exists. Missing or false capability keeps first-run setup active (including
+   native Windows); it does not narrow Kiro CLI readiness, whose internal
+   sandbox can be delegated to on Windows. `sandbox_unavailable` remains the
+   separate Kiro probe-refusal verdict and still blocks this bypass. KAS remains
+   subject to the Kiro ACP compatibility check. Separately,
+   `sandbox_blocked_backends` lists enforced harnesses for which the runtime's
+   `credential_mask_applies(configured_sandbox_mode())` refuses: this includes
+   effective `off` even on a capable host, but honors a governance floor that
+   raises `off` to a sandboxed tier. The server owns the enforcement membership;
+   unenforced harnesses do not acquire that refusal. Unknown or failed probes
+   do not claim a harness is ready. A missing probe response does not label the configured
+   agent as not ready or offer a switch back to Kiro CLI; that warning requires
+   a returned probe. The picker's Use action applies the same sandbox eligibility
+   as the dashboard bypass; it cannot switch to a harness the gate would then
+   refuse, and shows a sandbox warning for that state. Failed config switches
+   name the attempted agent even if the picker selection changes afterward,
+   and switch/re-check notices have their own retry controls. Settings and this
+   gate use one translated harness-name helper;
 3. shows the Linux/macOS or Windows one-line Kiro CLI install command to copy,
    and links to Kiro's official setup page (`OFFICIAL_INSTALL_DOCS_URL`,
    `https://kiro.dev/cli/`). Neither action runs an installer in Kiro Crew;
@@ -2495,7 +2516,19 @@ still refresh while the dashboard body is blocked. On a new gateway it:
    the personal sign-in command naming the path as the app's built-in kiro-cli,
    so an absolute path is explained rather than surprising; and the bundled
    copy's **Update** is refused (`BUNDLED_CLI_UPDATE_REFUSAL`);
-5. records first-run completion when the selected backend is usable.
+5. records first-run completion when the selected backend is usable. An owner
+   PATCH selecting an independent backend, or a later explicit agent **Check
+   again** after installation, records the gateway's existing setup-complete
+   marker once the server confirms that the configured backend is selectable,
+   installed, does not need a gateway restart, and passes the host sandbox
+   checks. A marker write failure returns a coded 503 explaining that the
+   selection or re-check succeeded but completion did not persist, with a retry
+   action; it never reports a successful completed setup. A later browser and
+   an authorized non-owner then read the durable `initial_setup_complete` bit
+   instead of depending on the first browser's localStorage. An unknown or
+   missing install probe does not write the marker; installation is not proof
+   of harness sign-in, which the first ACP turn still verifies and reports in
+   chat.
 
 **Kiro Crew performs neither setup step, and there is no code path that could.**
 Both belong to Kiro CLI. Deleted for install: the installer download
@@ -2654,18 +2687,37 @@ to a slot is a lifecycle change wider than this guard.
 (`_save_slot_to_history`, `_pending_rewrite`) *before* dispatching the background
 turn, so "let the ACP attempt be the authority" does not hold for them: by the
 time the turn raises `AcpAuthRequired` the history is already rewritten and no
-error card can undo it. All three therefore call `reject_if_kiro_unverified`
-BEFORE any mutation, returning the shared `kiro_prerequisite_required` 503.
+error card can undo it. All three therefore call
+`reject_if_configured_backend_unverified` BEFORE any mutation. These operations
+are currently Kiro CLI-only. The guard resolves the target slot's effective
+backend (including `agent.member_acp_backend` for member DMs) before inspecting
+Kiro readiness: a non-Kiro backend returns
+`backend_readiness_unsupported` 503 explaining that Crew cannot verify its
+sign-in before the operation. An installed binary or an unrelated authenticated
+Kiro CLI cannot authorize that backend's history rewrite. Kiro CLI retains the
+fresh probe and `kiro_prerequisite_required` refusal; a configuration-read failure
+returns `backend_readiness_unavailable`. The slot selection-capabilities response
+advertises `history_rerun_supported`; the composer hides regenerate and
+edit-resend for an unsupported backend, while the server still refuses a stale
+or direct request. Ordinary sends remain available.
 (`switch-variant` is exempt — it swaps an already-stored variant and starts no
 turn.)
 
-**`POST /v1/chat/completions` also fails closed**, for a different reason: it has
-no transcript the caller reads. Its collectors pick up only `chunk`/`assistant`
-roles, so the `error` card an `AcpAuthRequired` turn appends is invisible and the
-request would return **HTTP 200 with empty content** — an OpenAI SDK client
-cannot distinguish that from a model that legitimately said nothing. It returns
-the `kiro_prerequisite_required` 503 in OpenAI error shape until the endpoint
-learns to translate `AcpAuthRequired` itself.
+**`POST /v1/chat/completions` translates terminal turn errors.** It has no
+transcript the caller reads, so ignoring an `AcpAuthRequired` error row would
+return HTTP 200 with empty content. Kiro CLI still requires its fresh pre-turn
+probe (`kiro_prerequisite_required` 503). Other backends can dispatch without
+that unrelated Kiro sign-in; the collector watches terminal `error` rows and
+the runner's authentication outcome. Blocking replies return an OpenAI-shaped
+`acp_auth_required` 503 or `acp_turn_failed` 500, never an empty success;
+streaming replies emit the same error object as an SSE data frame before
+`[DONE]` (headers are already sent, so their HTTP status remains 200). Raw
+transcript error prose is not copied into either SDK response. Configuration
+read failure still returns `backend_readiness_unavailable` before dispatch.
+Readiness selects the authorized slot's effective backend, including the member
+backend for a member DM, before the prompt is appended. A recoverable error
+card followed by an assistant reply does not replace that reply with an SDK
+error; an unresolved error at turn end still does.
 
 **An unresolved check is never rendered as "setup required."** The cold probe
 spawns two sandboxed `kiro-cli` subprocesses (`--version`, then `whoami`), which

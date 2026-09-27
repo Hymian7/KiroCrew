@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,6 +24,15 @@ class _ReadyKiroPrerequisiteService(KiroPrerequisiteService):
 
 
 _READY_KIRO_PREREQUISITE = object.__new__(_ReadyKiroPrerequisiteService)
+
+
+class _UnreadyKiroPrerequisiteService(KiroPrerequisiteService):
+    async def verified_ready(self, *, max_age_secs: float) -> bool:
+        del max_age_secs
+        return False
+
+
+_UNREADY_KIRO_PREREQUISITE = object.__new__(_UnreadyKiroPrerequisiteService)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +271,159 @@ def _make_request(body: dict, state, app: str = ""):
 
 @pytest.mark.asyncio
 class TestApiCompletionsBlocking:
+    async def test_member_completion_uses_member_backend_when_default_kiro_is_unready(
+        self, monkeypatch
+    ):
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        monkeypatch.setattr(
+            KiroCrewConfig,
+            "load",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(acp_backend="", member_acp_backend="codex"),
+                agents={"foo": SimpleNamespace()},
+            ),
+        )
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.openai_compat.members_mod.read_dm_binding_for_slot",
+            lambda _key: {"member": "foo"},
+        )
+        slot = _make_slot()
+        slot.key = "member-foo"
+        slot.mode = "member"
+        slot.agent = "foo"
+        state = _make_state(slot)
+        request = _make_request(
+            {
+                "id": "member-foo",
+                "model": "foo",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+            state,
+        )
+        request.app["kiro_prerequisite_service"] = _UNREADY_KIRO_PREREQUISITE
+
+        async def reply(_state, target, _prompt, **_kwargs):
+            target._pending.append({"role": "assistant", "content": "member replied"})
+            target._pending.append({"cls": "done"})
+            target.event.set()
+
+        with patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=reply):
+            response = await api_completions(request)
+
+        assert response.status == 200
+        assert json.loads(response.body)["choices"][0]["message"]["content"] == "member replied"
+
+    @pytest.mark.parametrize("backend", ["codex", "claude", "kas"])
+    async def test_non_kiro_completion_returns_its_assistant_reply(self, monkeypatch, backend):
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        monkeypatch.setattr(
+            KiroCrewConfig,
+            "load",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(acp_backend=backend, member_acp_backend="kas")
+            ),
+        )
+        state = _make_state(_make_slot())
+        request = _make_request(
+            {"model": "vanellope", "messages": [{"role": "user", "content": "hello"}]}, state
+        )
+
+        async def reply(_state, slot, _prompt, **_kwargs):
+            slot._pending.append({"role": "assistant", "content": "hello from agent"})
+            slot._pending.append({"cls": "done"})
+            slot.event.set()
+
+        with patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=reply):
+            response = await api_completions(request)
+        body = json.loads(response.body)
+        assert response.status == 200
+        assert body["choices"][0]["message"]["content"] == "hello from agent"
+
+    async def test_non_kiro_auth_failure_is_an_openai_error(self, monkeypatch):
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        monkeypatch.setattr(
+            KiroCrewConfig,
+            "load",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(acp_backend="claude", member_acp_backend="claude")
+            ),
+        )
+        state = _make_state(_make_slot())
+        request = _make_request(
+            {"model": "vanellope", "messages": [{"role": "user", "content": "hello"}]}, state
+        )
+
+        async def auth_failure(_state, slot, _prompt, **_kwargs):
+            # Non-Kiro AcpAuthRequired has no Kiro sign-in card kind. The
+            # runner's terminal outcome flag is the authority at turn end.
+            slot._pending.append({"role": "error", "content": "sign in to Claude Code"})
+            slot._last_turn_auth_required = True
+            slot._pending.append({"cls": "done"})
+            slot.event.set()
+
+        with patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=auth_failure):
+            response = await api_completions(request)
+        body = json.loads(response.body)
+        assert response.status == 503
+        assert body["error"]["type"] == "service_unavailable_error"
+        assert body["error"]["code"] == "acp_auth_required"
+
+    async def test_non_auth_turn_failure_is_not_an_empty_completion(self, monkeypatch):
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        monkeypatch.setattr(
+            KiroCrewConfig,
+            "load",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(acp_backend="codex", member_acp_backend="codex")
+            ),
+        )
+        state = _make_state(_make_slot())
+        request = _make_request(
+            {"model": "vanellope", "messages": [{"role": "user", "content": "hello"}]}, state
+        )
+
+        async def failed(_state, slot, _prompt, **_kwargs):
+            slot._pending.append({"role": "error", "content": "private process detail"})
+            slot._last_turn_auth_required = False
+            slot._pending.append({"cls": "done"})
+            slot.event.set()
+
+        with patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=failed):
+            response = await api_completions(request)
+        assert response.status == 500
+        error = json.loads(response.body)["error"]
+        assert error["code"] == "acp_turn_failed"
+        assert "private process detail" not in error["message"]
+
+    async def test_recoverable_error_followed_by_reply_returns_completion(self):
+        slot = _make_slot()
+        state = _make_state(slot)
+        request = _make_request(
+            {"model": "vanellope", "messages": [{"role": "user", "content": "hello"}]}, state
+        )
+
+        async def recovered(_state, target, _prompt, **_kwargs):
+            target._pending.extend(
+                [
+                    {"role": "error", "content": "approval timed out"},
+                    {"role": "assistant", "content": "I finished after the timeout"},
+                    {"cls": "done"},
+                ]
+            )
+            target.event.set()
+
+        with patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=recovered):
+            response = await api_completions(request)
+
+        assert response.status == 200
+        assert json.loads(response.body)["choices"][0]["message"]["content"] == (
+            "I finished after the timeout"
+        )
+
     async def test_prerequisite_error_uses_openai_schema(self, tmp_path):
         """This endpoint fails closed, in OpenAI error shape.
 
@@ -426,6 +589,88 @@ class TestAgentMapping:
 
 @pytest.mark.asyncio
 class TestStreamingResponse:
+    async def test_stream_recoverable_error_followed_by_reply_finishes_successfully(self):
+        slot = _make_slot()
+        state = _make_state(slot)
+        request = _make_request(
+            {
+                "model": "vanellope",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+            state,
+        )
+        written: list[bytes] = []
+        response = MagicMock()
+        response.prepare = AsyncMock()
+        response.write = AsyncMock(side_effect=lambda data: written.append(data))
+        response.headers = {}
+
+        async def recovered(_state, target, _prompt, **_kwargs):
+            target._pending.extend(
+                [
+                    {"role": "error", "content": "connection lost, retrying"},
+                    {"role": "assistant", "content": "reply after retry"},
+                    {"cls": "done"},
+                ]
+            )
+            target.event.set()
+
+        with (
+            patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=recovered),
+            patch("kiro_crew.dashboard.openai_compat.web.StreamResponse", return_value=response),
+        ):
+            await api_completions(request)
+
+        stream = b"".join(written).decode()
+        assert "reply after retry" in stream
+        assert '"finish_reason": "stop"' in stream
+        assert '"code": "acp_turn_failed"' not in stream
+
+    async def test_stream_auth_failure_emits_error_instead_of_empty_success(self, monkeypatch):
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        monkeypatch.setattr(
+            KiroCrewConfig,
+            "load",
+            lambda: SimpleNamespace(
+                agent=SimpleNamespace(acp_backend="claude", member_acp_backend="claude")
+            ),
+        )
+        slot = _make_slot()
+        state = _make_state(slot)
+        request = _make_request(
+            {
+                "model": "vanellope",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+            state,
+        )
+        written: list[bytes] = []
+        response = MagicMock()
+        response.prepare = AsyncMock()
+        response.write = AsyncMock(side_effect=lambda data: written.append(data))
+        response.headers = {}
+
+        async def auth_failure(_state, target, _prompt, **_kwargs):
+            target._pending.append({"role": "error", "content": "private auth detail"})
+            target._last_turn_auth_required = True
+            target._pending.append({"cls": "done"})
+            target.event.set()
+
+        with (
+            patch("kiro_crew.dashboard.openai_compat._run_chat", side_effect=auth_failure),
+            patch("kiro_crew.dashboard.openai_compat.web.StreamResponse", return_value=response),
+        ):
+            await api_completions(request)
+
+        stream = b"".join(written).decode()
+        assert '"code": "acp_auth_required"' in stream
+        assert "data: [DONE]" in stream
+        assert '"finish_reason": "stop"' not in stream
+        assert "private auth detail" not in stream
+
     async def test_stream_sends_sse_chunks(self):
         slot = _make_slot()
         state = _make_state(slot)

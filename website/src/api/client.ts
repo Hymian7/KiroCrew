@@ -1418,6 +1418,8 @@ export interface AcpBackendProbe {
   id: string
   policy_id: string
   selectable: boolean
+  /** Explicit gateway capability: this harness can complete setup without Kiro CLI. */
+  independent_setup: boolean
   installed: AcpBackendInstalled
   missing_components: string[]
   install_command: string
@@ -2509,6 +2511,10 @@ export interface KiroPrerequisiteStatus {
    * CLI is installed.
    */
   sandbox_unavailable: boolean
+  /** Crew OS sandbox capability; absent on older gateways, so bypass requires true. */
+  sandbox_backend_available?: boolean
+  /** Runtime-enforced harness ids whose credential mask cannot apply at the effective tier. */
+  sandbox_blocked_backends?: string[]
   /** Machine-readable: 'transient' | 'foreign_sandbox' | 'no_backend' | ''. */
   sandbox_failure_kind: string
   /** Technical probe reason, e.g. 'unshare(CLONE_NEWNS) failed with errno 1 (EPERM)'. */
@@ -4038,6 +4044,7 @@ export const api = {
       effort_supported?: boolean
       effort_levels?: string[]
       model_effort_pair_ids?: boolean
+      history_rerun_supported?: boolean
     }>,
   effortLevels: (slot?: string) =>
     fetch('/api/effort-levels' + (slot ? '?slot=' + encodeURIComponent(slot) : '')).then(j) as Promise<string[]>,

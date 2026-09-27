@@ -451,3 +451,61 @@ async def test_a_ready_gateway_logs_no_refusal() -> None:
             await agents.api_models(request)
 
     warn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_configured_foreign_backend_does_not_change_kiro_poller_guard(monkeypatch):
+    from kiro_crew.config.loader import KiroCrewConfig
+
+    monkeypatch.setattr(
+        KiroCrewConfig,
+        "load",
+        lambda: SimpleNamespace(
+            agent=SimpleNamespace(acp_backend="codex", member_acp_backend="kas")
+        ),
+    )
+    request = _request(_make_ready_kiro_prerequisite())
+    assert await kiro_readiness.reject_if_kiro_unverified(request) is None
+    blocked = await kiro_readiness.reject_if_configured_backend_unverified(request)
+    assert blocked is not None
+    assert json.loads(blocked.body)["code"] == "backend_readiness_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_member_slot_uses_its_backend_before_destructive_operation(monkeypatch):
+    from kiro_crew.config.loader import KiroCrewConfig
+
+    monkeypatch.setattr(
+        KiroCrewConfig,
+        "load",
+        lambda: SimpleNamespace(agent=SimpleNamespace(acp_backend="", member_acp_backend="claude")),
+    )
+    request = _request(_make_ready_kiro_prerequisite())
+
+    blocked = await kiro_readiness.reject_if_configured_backend_unverified(
+        request, session_key="member-reviewer"
+    )
+    assert blocked is not None
+    assert blocked.status == 503
+    assert json.loads(blocked.body)["code"] == "backend_readiness_unsupported"
+    assert (
+        await kiro_readiness.reject_if_configured_backend_unverified(
+            request, session_key="ordinary-chat"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_config_cannot_authorize_verified_operations(monkeypatch):
+    from kiro_crew.config.loader import KiroCrewConfig
+
+    def fail():
+        raise OSError("fixture read failure")
+
+    monkeypatch.setattr(KiroCrewConfig, "load", fail)
+    request = _request(_make_ready_kiro_prerequisite())
+    blocked = await kiro_readiness.reject_if_configured_backend_unverified(request)
+    assert blocked is not None
+    assert blocked.status == 503
+    assert json.loads(blocked.body)["code"] == "backend_readiness_unavailable"

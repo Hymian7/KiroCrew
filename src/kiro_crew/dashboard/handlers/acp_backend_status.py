@@ -176,12 +176,14 @@ def _row(state: Any, selectable: set) -> Dict[str, Any]:
         declaration_for,
         signs_in_separately,
     )
+    from kiro_crew.agent_sdk.backends import ACP_BACKENDS_INDEPENDENT_SETUP
 
     auth = declaration_for(state.backend)
     return {
         "id": state.backend,
         "policy_id": state.policy_id,
         "selectable": state.backend in selectable,
+        "independent_setup": state.backend in ACP_BACKENDS_INDEPENDENT_SETUP,
         "installed": state.installed,
         # Enforced here, not just by the probes: the contract makes this
         # non-empty ONLY for a MISSING verdict, so an UNKNOWN row can
@@ -312,6 +314,36 @@ async def api_acp_backend_recheck(request: web.Request) -> web.Response:
     # On the loop, before the offload: the clear must not run in the worker thread.
     forget_for_recheck(backend)
     row = await asyncio.to_thread(_recheck, backend)
+
+    # The configured harness may have been installed after the initial config
+    # PATCH. This owner-requested POST is the first state-derived opportunity to
+    # persist first-run completion once the fresh probe says it is usable. GET
+    # remains read-only; a failed marker write is a retryable partial success.
+    from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+
+    prerequisite = request.app.get("kiro_prerequisite_service")
+    if (
+        isinstance(prerequisite, KiroPrerequisiteService)
+        and not prerequisite.initial_setup_complete
+    ):
+        from kiro_crew.config.loader import KiroCrewConfig
+
+        configured = await asyncio.to_thread(KiroCrewConfig.load)
+        if configured.agent.acp_backend == backend:
+            try:
+                await prerequisite.record_independent_backend_setup(backend)
+            except Exception:
+                logger.warning(
+                    "Could not record independent backend setup on re-check", exc_info=True
+                )
+                return web.json_response(
+                    {
+                        "error": "Agent check completed, but setup completion could not be recorded. Press Check again.",
+                        "code": "setup_marker_write_failed",
+                        "recheck_complete": True,
+                    },
+                    status=503,
+                )
 
     caller = str(request.get("user") or "")
     audit_caller = str(request.get("app") or caller or "unknown")

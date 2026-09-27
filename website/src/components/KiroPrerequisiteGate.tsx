@@ -21,7 +21,7 @@ import {
   type AcpBackendProbe,
   type KiroPrerequisiteStatus,
 } from '../api/client'
-import { ACP_BACKEND_KIRO } from '../api/acpBackend'
+import { ACP_BACKEND_KIRO, acpBackendName } from '../api/acpBackend'
 import { clearCachedModels } from '../providers/adapters/acp'
 import {
   PANEL_CLASS,
@@ -38,6 +38,15 @@ import ErrorNotice from './ErrorNotice'
 import { Trans } from 'react-i18next'
 import { i18nT } from '../i18n/t'
 const QUERY_KEY = ['kiro-prerequisite'] as const
+
+function setupMarkerErrorMessage(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null
+  try {
+    return JSON.parse(error.body)?.code === 'setup_marker_write_failed' ? error.message : null
+  } catch {
+    return null
+  }
+}
 
 export function kiroPrerequisiteRefetchInterval(
   status: KiroPrerequisiteStatus | undefined,
@@ -1022,8 +1031,11 @@ function configuredBackendCanStart(
   status: KiroPrerequisiteStatus | undefined,
   probe: AcpBackendProbe | undefined,
 ): boolean {
-  if (!status || !backendUsable(probe) || status.sandbox_unavailable) return false
-  return probe?.id !== KAS_BACKEND || status.acp_supported !== false
+  if (!status || !backendUsable(probe) || status.sandbox_unavailable
+    || status.sandbox_backend_available !== true) return false
+  if (probe && status.sandbox_blocked_backends?.includes(probe.id)) return false
+  if (probe?.id === KAS_BACKEND) return status.acp_supported !== false
+  return probe?.independent_setup === true
 }
 
 /**
@@ -1051,24 +1063,11 @@ function agentReady(probe: AcpBackendProbe): boolean {
 /** The backends this screen offers as alternatives to Kiro CLI. */
 function otherCodingAgents(backends: AcpBackendProbe[]): AcpBackendProbe[] {
   return backends.filter(
-    b => b.id !== KIRO_BACKEND && b.id !== KAS_BACKEND && b.selectable !== false,
+    b => b.independent_setup === true && b.selectable !== false,
   )
 }
 
-/**
- * The same names Settings → Agent shows, from the same keys: that panel is the
- * one catalog of translated harness names, and an id it does not name renders
- * under the server's `policy_id` there too. A second catalog here would let the
- * two screens call one agent two things.
- */
-function agentName(probe: AcpBackendProbe): string {
-  switch (probe.id) {
-    case 'claude': return i18nT('pages.developer.agentBackendTab.claude_code')
-    default: return probe.policy_id || probe.id
-  }
-}
-
-function AgentStatusBadge({ probe }: { probe: AcpBackendProbe }) {
+function AgentStatusBadge({ probe, blocked }: { probe: AcpBackendProbe; blocked: boolean }) {
   if (probe.installed === 'missing') {
     return <Badge variant="muted">{i18nT('components.kiroPrerequisiteGate.agent_not_installed')}</Badge>
   }
@@ -1079,7 +1078,7 @@ function AgentStatusBadge({ probe }: { probe: AcpBackendProbe }) {
     return <Badge variant="muted">{i18nT('components.kiroPrerequisiteGate.agent_unverified')}</Badge>
   }
   return (
-    <Badge variant="ok">
+    <Badge variant={blocked ? 'warn' : 'ok'}>
       <CheckCircle2 className="lucide-inline" /> {i18nT('components.kiroPrerequisiteGate.agent_installed')}
     </Badge>
   )
@@ -1141,15 +1140,19 @@ function KiroInstallCommands({ platform }: { platform: string }) {
  * dashboard as soon as that agent is usable. Nothing is installed from here.
  */
 function OtherCodingAgents({
+  status,
   configured,
   backends,
   loading,
   failed,
+  onRetryBackends,
 }: {
+  status: KiroPrerequisiteStatus
   configured: string
   backends: AcpBackendProbe[]
   loading: boolean
   failed: boolean
+  onRetryBackends: () => void
 }) {
   const qc = useQueryClient()
   const others = otherCodingAgents(backends)
@@ -1163,7 +1166,7 @@ function OtherCodingAgents({
       ? picked
       : others.some(b => b.id === configuredOther)
         ? configuredOther
-        : (others.find(backendUsable)?.id ?? others[0]?.id ?? '')
+        : (others.find(b => configuredBackendCanStart(status, b))?.id ?? others[0]?.id ?? '')
   const shown = others.find(b => b.id === shownId)
   const configuredProbe = backends.find(b => b.id === configuredOther)
 
@@ -1196,12 +1199,18 @@ function OtherCodingAgents({
   })
 
   const panelId = 'other-coding-agents-panel'
-  const name = shown ? agentName(shown) : ''
+  const name = shown ? acpBackendName(shown) : ''
   const busy = switchMut.isPending || recheckMut.isPending
+  const attemptedBackend = backends.find(b => b.id === switchMut.variables)
+  const markerWriteError = setupMarkerErrorMessage(switchMut.error)
   const switchError = switchMut.isError
-    ? (switchMut.variables === KIRO_BACKEND
+    ? (markerWriteError
+      ? markerWriteError
+      : switchMut.variables === KIRO_BACKEND
       ? i18nT('components.kiroPrerequisiteGate.could_not_switch_to_kiro')
-      : i18nT('components.kiroPrerequisiteGate.could_not_switch_agent', { name }))
+      : i18nT('components.kiroPrerequisiteGate.could_not_switch_agent', {
+        name: attemptedBackend ? acpBackendName(attemptedBackend) : switchMut.variables,
+      }))
     : ''
 
   return (
@@ -1224,16 +1233,17 @@ function OtherCodingAgents({
       </button>
       {open && (
         <div id={panelId} className="space-y-4 border-t border-border px-4 py-4">
-          {configuredOther && !backendUsable(configuredProbe) && (
+          {configuredOther && configuredProbe && !configuredBackendCanStart(status, configuredProbe) && (
             <div className="rounded-lg border border-warn/40 bg-warn-subtle px-3 py-2.5 text-[13px] leading-relaxed text-text">
               <p>
                 {i18nT('components.kiroPrerequisiteGate.configured_agent_not_ready', {
-                  name: configuredProbe ? agentName(configuredProbe) : configuredOther,
+                  name: acpBackendName(configuredProbe),
                 })}
               </p>
+              <p className="mt-1">{i18nT('components.kiroPrerequisiteGate.switch_agent_later_in_settings')}</p>
               <Btn
                 type="button"
-                className="mt-2 h-8 rounded-lg px-3 text-[13px]"
+                className="mt-2 min-h-9 rounded-lg border-border-strong bg-card px-3 text-[13px] shadow-sm"
                 disabled={busy}
                 onClick={() => switchMut.mutate(KIRO_BACKEND)}
               >
@@ -1250,11 +1260,13 @@ function OtherCodingAgents({
             </p>
           ) : failed && others.length === 0 ? (
             <>
-              {/* No hand-off: no usable agent has been confirmed, and this setup
-                  gate hides the chat the hand-off would open. */}
+              {/* No hand-off: this prerequisite gate also blocks /chat. With
+                  no confirmed ready harness, navigating there cannot reach an
+                  agent to diagnose the probe failure. */}
               <ErrorNotice
                 message={i18nT('components.kiroPrerequisiteGate.other_agents_unavailable')}
                 testId="other-agents-probe-error"
+                footer={<Btn type="button" onClick={onRetryBackends}>{i18nT('components.kiroPrerequisiteGate.try_again')}</Btn>}
               />
             </>
           ) : others.length === 0 ? (
@@ -1294,7 +1306,7 @@ function OtherCodingAgents({
                             name="other-coding-agent"
                             value={b.id}
                             checked={selected}
-                            aria-label={agentName(b)}
+                            aria-label={acpBackendName(b)}
                             aria-controls={selected ? detailId : undefined}
                             onChange={() => setPicked(b.id)}
                             /* focus-cue-ok: the cue is on the row's rounded outline
@@ -1304,9 +1316,9 @@ function OtherCodingAgents({
                             className="h-4 w-4 shrink-0 accent-[var(--accent)] focus-visible:outline-none"
                           />
                           <Sparkles className="lucide-inline shrink-0 text-muted" aria-hidden="true" />
-                          <span className="truncate text-sm font-medium text-text-strong">{agentName(b)}</span>
+                          <span className="truncate text-sm font-medium text-text-strong">{acpBackendName(b)}</span>
                         </span>
-                        <AgentStatusBadge probe={b} />
+                        <AgentStatusBadge probe={b} blocked={!configuredBackendCanStart(status, b)} />
                       </label>
                       {selected && shown && (
                         <div id={detailId} className="space-y-3 border-t border-accent/30 bg-card p-4" data-testid="other-agent-detail">
@@ -1338,6 +1350,12 @@ function OtherCodingAgents({
                             <p className="text-[13px] leading-relaxed text-text">
                               {i18nT('components.kiroPrerequisiteGate.agent_restart_required_detail', { name })}
                             </p>
+                          ) : !configuredBackendCanStart(status, shown) ? (
+                            <div className="space-y-2 text-[13px] leading-relaxed text-warn" role="status">
+                              {i18nT('components.kiroPrerequisiteGate.sandbox_unavailable')}.{' '}
+                              {i18nT('components.kiroPrerequisiteGate.run_kirocrew_doctor_on_the_gateway_host_for_a_ful')}
+                              <CopyCommand><code>kirocrew doctor</code></CopyCommand>
+                            </div>
                           ) : shown.installed === 'unknown' ? (
                             <p className="text-[13px] leading-relaxed text-text">
                               {i18nT('components.kiroPrerequisiteGate.agent_unverified_detail', { name })}
@@ -1357,7 +1375,7 @@ function OtherCodingAgents({
                             <SendBtn
                               type="button"
                               className="inline-flex items-center gap-1.5"
-                              disabled={busy || !backendUsable(shown)}
+                              disabled={busy || !configuredBackendCanStart(status, shown)}
                               onClick={() => switchMut.mutate(shown.id)}
                             >
                               {switchMut.isPending && switchMut.variables === shown.id
@@ -1385,7 +1403,8 @@ function OtherCodingAgents({
                             className="text-xs"
                             message={
                               recheckMut.isError && recheckMut.variables === shown.id
-                                ? i18nT('components.kiroPrerequisiteGate.agent_recheck_failed', { name })
+                                ? setupMarkerErrorMessage(recheckMut.error)
+                                  ?? i18nT('components.kiroPrerequisiteGate.agent_recheck_failed', { name })
                                 : null
                             }
                             testId="other-agent-recheck-error"
@@ -1403,7 +1422,22 @@ function OtherCodingAgents({
           )}
           {/* No hand-off: the agent choice failed to save, and this setup gate
               hides the chat the hand-off would open. Keep the choice for retry. */}
-          <ErrorNotice className="text-xs" message={switchError || null} testId="other-agent-switch-error" />
+          <ErrorNotice
+            className="text-xs"
+            message={switchError || null}
+            testId="other-agent-switch-error"
+            footer={
+              <Btn
+                type="button"
+                disabled={busy || (switchMut.variables !== KIRO_BACKEND && !configuredBackendCanStart(status, attemptedBackend))}
+                onClick={() => {
+                  if (switchMut.variables !== undefined) switchMut.mutate(switchMut.variables)
+                }}
+              >
+                {i18nT('components.kiroPrerequisiteGate.try_again')}
+              </Btn>
+            }
+          />
         </div>
       )}
     </div>
@@ -1708,9 +1742,9 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
 
           {configQuery.isError && (
             <>
-              {/* No hand-off: the configured agent is unknown, and this setup
-                  gate hides the chat the hand-off would open. Retry the read here.
-                  Outside the collapsed picker so the Kiro fallback is not silent. */}
+              {/* No hand-off: OtherCodingAgents below holds the unsaved radio
+                  choice in picked until Use is pressed; navigating would lose it.
+                  Retry here without discarding that agent selection. */}
               <ErrorNotice
                 className="mb-5"
                 message={i18nT('pages.developer.agentBackendTab.could_not_load_the_agent_backend')}
@@ -1784,16 +1818,20 @@ export default function KiroPrerequisiteGate({ children }: { children: ReactNode
                 onClick={retryStatus}
               >
                 <RefreshCw className={`lucide-inline ${statusQuery.isFetching ? 'animate-spin' : ''}`} />
-                {i18nT('components.kiroPrerequisiteGate.check_again_for_kiro_cli')}
+                {status.installed
+                  ? i18nT('components.kiroPrerequisiteGate.check_sign_in_again')
+                  : i18nT('components.kiroPrerequisiteGate.check_again_for_kiro_cli')}
               </SendBtn>
             </div>
           </Card>
 
           <OtherCodingAgents
+            status={status}
             configured={configuredBackend ?? KIRO_BACKEND}
             backends={backendsQuery.data?.backends ?? []}
             loading={backendsQuery.isPending && backendsQuery.fetchStatus !== 'idle'}
             failed={backendsQuery.isError}
+            onRetryBackends={() => { void backendsQuery.refetch() }}
           />
         </>
     </SetupShell>

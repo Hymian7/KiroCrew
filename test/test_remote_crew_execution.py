@@ -3661,11 +3661,15 @@ class TestBoundSlotRefusesTurnRestartingActions:
 
         # Readiness is orthogonal to this guard; stub it so a 503 latch cannot
         # mask the 409 under test (continue is not readiness-gated).
-        async def _ok(_request):
+        async def _ok(_request, **_kwargs):
             return None
 
-        monkeypatch.setattr("kiro_crew.dashboard.chat_regenerate.reject_if_kiro_unverified", _ok)
-        monkeypatch.setattr("kiro_crew.dashboard.chat_rewind.reject_if_kiro_unverified", _ok)
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_regenerate.reject_if_configured_backend_unverified", _ok
+        )
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_rewind.reject_if_configured_backend_unverified", _ok
+        )
 
         state = _make_state(tmp_path)
         slot = await self._bound_slot(state)
@@ -3715,10 +3719,12 @@ class TestBoundSlotRefusesTurnRestartingActions:
         """
         from aiohttp.test_utils import TestClient, TestServer
 
-        async def _ok(_request):
+        async def _ok(_request, **_kwargs):
             return None
 
-        monkeypatch.setattr("kiro_crew.dashboard.chat_rewind.reject_if_kiro_unverified", _ok)
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_rewind.reject_if_configured_backend_unverified", _ok
+        )
 
         state = _make_state(tmp_path)
         await self._bound_slot(state)  # remote slot in state, _app unset (owner-only)
@@ -3728,6 +3734,39 @@ class TestBoundSlotRefusesTurnRestartingActions:
             resp = await client.post(path, json=body)
             assert resp.status == 404, f"{path} leaked a remote slot to a foreign app"
             assert (await resp.json())["code"] == "slot_not_found"
+
+    @pytest.mark.parametrize(
+        "path,body",
+        [
+            ("/api/chat/slots/chat-1/edit-resend", {"index": 0, "content": "edited"}),
+            ("/api/chat/slots/chat-1/rewind", {"at_message_index": 0, "content": "edited"}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_foreign_app_cannot_probe_backend_readiness_of_unowned_slot(
+        self, tmp_path, monkeypatch, path, body
+    ):
+        """An unowned slot and an absent slot both 404 before backend lookup."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        readiness = AsyncMock(side_effect=AssertionError("readiness checked before ownership"))
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_regenerate.reject_if_configured_backend_unverified",
+            readiness,
+        )
+        monkeypatch.setattr(
+            "kiro_crew.dashboard.chat_rewind.reject_if_configured_backend_unverified",
+            readiness,
+        )
+        state = _make_state(tmp_path)
+        await self._bound_slot(state)
+
+        async with TestClient(TestServer(_turn_action_app(state, app_name="notes"))) as client:
+            for slot_key in ("chat-1", "missing"):
+                response = await client.post(path.replace("chat-1", slot_key), json=body)
+                assert response.status == 404
+                assert (await response.json())["code"] == "slot_not_found"
+        readiness.assert_not_awaited()
 
 
 class TestRemoteSlotNeverRunsLocally:

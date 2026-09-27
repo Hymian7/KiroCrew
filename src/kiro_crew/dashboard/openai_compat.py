@@ -5,6 +5,8 @@ allowing any OpenAI SDK client to talk to KiroCrew agents by setting
 `model` to the agent name (e.g. "router", "lite").
 
 Limitations:
+- Kiro CLI requires verified sign-in before dispatch. Other backends rely on
+  terminal ACP errors translated into OpenAI-shaped errors after the turn.
 - ``usage`` fields are hardcoded to zero; KiroCrew does not track token
   counts at the slot layer. Clients relying on usage for billing/rate-
   limiting should use their own tokenizer on the response content.
@@ -26,7 +28,7 @@ from kiro_crew import members as members_mod
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.context import _neutralize_structural_markers
 from kiro_crew.dashboard.chat_runner import _run_chat
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import reject_if_configured_backend_unverified
 from kiro_crew.dashboard.state import DashboardState, _normalize_slot_key
 from kiro_crew.dashboard.turn_dispatch import chat_turn_timeout_secs
 from kiro_crew.security import redact_credentials, redact_exfiltration_urls
@@ -130,24 +132,6 @@ def _redact(text: str) -> str:
 
 async def api_completions(request: web.Request) -> web.StreamResponse:
     """POST /v1/chat/completions — OpenAI-compatible chat endpoint."""
-    # Unlike the dashboard, this endpoint has no transcript the caller reads: the
-    # collectors below pick up only `chunk`/`assistant` roles, so the `error` card
-    # an AcpAuthRequired turn appends is invisible and the request would return
-    # HTTP 200 with empty content — an SDK client cannot tell that apart from a
-    # model that legitimately said nothing. Fail closed until this endpoint
-    # translates AcpAuthRequired into an OpenAI-shaped error.
-    blocked = await reject_if_kiro_unverified(request)
-    if blocked is not None:
-        return web.json_response(
-            {
-                "error": {
-                    "message": "Kiro CLI setup or sign-in is required before starting a session.",
-                    "type": "service_unavailable_error",
-                    "code": "kiro_prerequisite_required",
-                }
-            },
-            status=503,
-        )
     state: DashboardState = request.app["state"]
 
     try:
@@ -574,6 +558,29 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
                 status=403,
             )
 
+    # Resolve the effective backend from the authorized slot. A member DM can
+    # use a different harness from the dashboard default, so probing first
+    # would refuse a healthy member turn on an unrelated Kiro sign-out. SDK
+    # callers do not read the transcript: the collectors translate terminal
+    # errors for non-Kiro turns, while Kiro retains its fresh pre-turn probe.
+    blocked = await reject_if_configured_backend_unverified(
+        request, session_key=slot.key, turn_error_translatable=True
+    )
+    if blocked is not None:
+        if not slot_id or freshly_created:
+            state._slots.pop(slot.key, None)
+        refusal = json.loads(blocked.text or "{}")
+        return web.json_response(
+            {
+                "error": {
+                    "message": refusal["error"],
+                    "type": "service_unavailable_error",
+                    "code": refusal["code"],
+                }
+            },
+            status=503,
+        )
+
     # Drain stale pending from prior turns whose reader disconnected
     slot.drain()
 
@@ -662,6 +669,31 @@ async def api_completions(request: web.Request) -> web.StreamResponse:
             return await _blocking_response(state, slot, completion_id, model, created, ephemeral)
 
 
+def _completion_turn_error(slot: Any) -> tuple[dict[str, Any], int]:
+    """Translate a terminal transcript error without copying its raw text."""
+    if getattr(slot, "_last_turn_auth_required", False) is True:
+        return (
+            {
+                "error": {
+                    "message": "The configured agent requires sign-in before this request can complete.",
+                    "type": "service_unavailable_error",
+                    "code": "acp_auth_required",
+                }
+            },
+            503,
+        )
+    return (
+        {
+            "error": {
+                "message": "The configured agent could not complete this request.",
+                "type": "server_error",
+                "code": "acp_turn_failed",
+            }
+        },
+        500,
+    )
+
+
 async def _stream_response(
     request: web.Request,
     state: DashboardState,
@@ -681,10 +713,22 @@ async def _stream_response(
     try:
         _redact_buffer = ""
         _last_emitted_len = 0
+        pending_error = False
         while True:
             pending = slot.drain()
             for msg in pending:
+                if msg.get("role") == "error":
+                    # A tool timeout or recovery card can precede a successful
+                    # assistant reply in the same turn. Only the last unresolved
+                    # error at `done` describes a failed completion.
+                    pending_error = True
+                    continue
                 if msg.get("cls") == "done":
+                    if pending_error:
+                        error, _status = _completion_turn_error(slot)
+                        await resp.write(f"data: {json.dumps(error)}\n\n".encode())
+                        await resp.write(b"data: [DONE]\n\n")
+                        return resp
                     # Flush remaining buffer
                     if _redact_buffer:
                         final = _redact(_redact_buffer)
@@ -721,6 +765,7 @@ async def _stream_response(
                 content = msg.get("content") or ""
                 if not content:
                     continue
+                pending_error = False
 
                 # Buffered redaction: accumulate, redact full buffer, emit safe prefix
                 _redact_buffer += content
@@ -785,12 +830,22 @@ async def _blocking_response(
     counts at the slot layer.
     """
     collected: list[str] = []
+    pending_error = False
 
     try:
         while True:
             pending = slot.drain()
             for msg in pending:
+                if msg.get("role") == "error":
+                    pending_error = True
+                    continue
                 if msg.get("cls") == "done":
+                    if pending_error:
+                        error, status = _completion_turn_error(slot)
+                        return web.json_response(
+                            {"error": error["error"], "code": error["error"]["code"]},
+                            status=status,
+                        )
                     content = _redact("".join(collected))
                     return web.json_response(
                         {
@@ -812,6 +867,8 @@ async def _blocking_response(
                             },
                         }
                     )
+                if msg.get("role") in ("chunk", "assistant") and msg.get("content"):
+                    pending_error = False
                 if msg.get("role") == "chunk":
                     collected.append(msg.get("content", ""))
                 elif msg.get("role") == "assistant" and not collected:

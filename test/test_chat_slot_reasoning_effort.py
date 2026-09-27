@@ -94,6 +94,7 @@ class TestSlotSelectionCapabilities:
             "effort_supported": True,
             "effort_levels": levels,
             "model_effort_pair_ids": pair_ids,
+            "history_rerun_supported": False,
         }
 
     @pytest.mark.asyncio
@@ -117,7 +118,11 @@ class TestSlotSelectionCapabilities:
             data = await resp.json()
 
         assert resp.status == 200
-        assert data == {"known": False, "model_effort_pair_ids": True}
+        assert data == {
+            "known": False,
+            "model_effort_pair_ids": True,
+            "history_rerun_supported": False,
+        }
 
     @pytest.mark.asyncio
     async def test_cold_member_session_uses_member_backend_for_pair_ids(self, monkeypatch):
@@ -134,7 +139,11 @@ class TestSlotSelectionCapabilities:
             data = await resp.json()
 
         assert resp.status == 200
-        assert data == {"known": False, "model_effort_pair_ids": True}
+        assert data == {
+            "known": False,
+            "model_effort_pair_ids": True,
+            "history_rerun_supported": False,
+        }
 
     @pytest.mark.asyncio
     async def test_live_provider_can_report_effort_unsupported(self):
@@ -154,6 +163,7 @@ class TestSlotSelectionCapabilities:
             "effort_supported": False,
             "effort_levels": [],
             "model_effort_pair_ids": False,
+            "history_rerun_supported": False,
         }
         provider.get_valid_effort_levels.assert_not_called()
 
@@ -162,7 +172,7 @@ class TestSlotSelectionCapabilities:
         self, monkeypatch
     ):
         provider = MagicMock(spec=AcpProvider)
-        provider.capabilities = SimpleNamespace(backend="kiro")
+        provider.capabilities = SimpleNamespace(backend="")
         provider.supports_effort.return_value = True
         provider.get_valid_effort_levels.return_value = []
         monkeypatch.setattr(
@@ -177,10 +187,11 @@ class TestSlotSelectionCapabilities:
         assert resp.status == 200
         assert data == {
             "known": True,
-            "backend": "kiro",
+            "backend": "",
             "effort_supported": True,
             "effort_levels": ["low", "medium", "high"],
             "model_effort_pair_ids": False,
+            "history_rerun_supported": True,
         }
 
     @pytest.mark.asyncio
@@ -222,7 +233,11 @@ class TestSlotSelectionCapabilities:
             data = await resp.json()
 
         assert resp.status == 200
-        assert data == {**payload, "effort_levels": ["off", "minimal"]}
+        assert data == {
+            **payload,
+            "effort_levels": ["off", "minimal"],
+            "history_rerun_supported": False,
+        }
         register_levels.assert_called_once_with(["off", "minimal", "high"])
         manager.proxy_request.assert_called_once_with(
             "nobita", "GET", "api/chat/slots/peer-chat-9/selection-capabilities"
@@ -258,7 +273,7 @@ class TestSlotSelectionCapabilities:
             data = await resp.json()
 
         assert resp.status == 200
-        assert data == payload
+        assert data == {**payload, "history_rerun_supported": False}
 
     @pytest.mark.asyncio
     async def test_remote_slot_reports_an_error_when_its_peer_is_unavailable(self, monkeypatch):

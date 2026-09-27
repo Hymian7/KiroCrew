@@ -36,19 +36,19 @@ describe('ChatPage – crew-bound offer gates', () => {
   })
 
   it('gates handleRegenerate on the crew-bound flag (early return)', () => {
-    expect(chatPageSrc).toMatch(/if \(!activeSlot \|\| regenerating \|\| slotRunning \|\| activeSlotRemoteBound\) return/)
+    expect(chatPageSrc).toMatch(/if \(!activeSlot \|\| regenerating \|\| slotRunning \|\| activeSlotRemoteBound \|\| !historyRerunSupported\) return/)
   })
 
   it('gates handleEditResend on the crew-bound flag (early return)', () => {
-    expect(chatPageSrc).toMatch(/if \(!activeSlot \|\| slotRunning \|\| activeSlotRemoteBound\) return/)
+    expect(chatPageSrc).toMatch(/if \(!activeSlot \|\| slotRunning \|\| activeSlotRemoteBound \|\| !historyRerunSupported\) return/)
   })
 
   it('withholds the Edit affordance (canEdit) on a crew-bound slot', () => {
-    expect(chatPageSrc).toMatch(/canEdit=\{!slotRunning && !regenerating && !!activeSlot && !activeSlotRemoteBound\}/)
+    expect(chatPageSrc).toMatch(/canEdit=\{!slotRunning && !regenerating && !!activeSlot && !activeSlotRemoteBound && historyRerunSupported\}/)
   })
 
   it('withholds the Regenerate offer on a crew-bound slot', () => {
-    expect(chatPageSrc).toMatch(/onRegenerate=\{i === lastTextIdxRef\.current && !slotRunning && !regenerating && activeSlot && !activeSlotRemoteBound \? handleRegenerate : undefined\}/)
+    expect(chatPageSrc).toMatch(/onRegenerate=\{i === lastTextIdxRef\.current && !slotRunning && !regenerating && activeSlot && !activeSlotRemoteBound && historyRerunSupported \? handleRegenerate : undefined\}/)
   })
 
   it('does NOT gate onSwitchVariant — the server allows switch-variant on a bound slot (no remote_bound_refusal)', () => {

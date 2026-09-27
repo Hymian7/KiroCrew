@@ -2473,11 +2473,12 @@
       "switching_agent": "Switching…",
       "could_not_switch_agent": "Could not switch to {{name}}. Try again.",
       "could_not_switch_to_kiro": "Could not switch back to Kiro CLI. Try again.",
-      "agent_recheck_failed": "Could not re-check {{name}}. Try again.",
+      "agent_recheck_failed": "Could not re-check {{name}}. Press Check again.",
       "configured_agent_not_ready": "{{productName}} is set to use {{name}}, which isn't ready on this host yet. Finish installing it below, or set up Kiro CLI instead.",
       "use_kiro_cli_instead": "Use Kiro CLI instead",
       "switch_agent_later_in_settings": "You can switch agents at any time in Developer > Agent Backend.",
-      "check_again_for_kiro_cli": "Check again for Kiro CLI"
+      "check_again_for_kiro_cli": "Check again for Kiro CLI",
+      "check_sign_in_again": "Check sign-in again"
     },
     "linkedSurfacesSection": {
       "connect_failed": "Could not connect to {{label}}: {{reason}}",

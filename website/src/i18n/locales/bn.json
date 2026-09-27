@@ -271,7 +271,7 @@
     "connect_your_phone": "ফোন সংযুক্ত করুন",
     "kiro_credit_usage_no_reading": "Kiro ক্রেডিট ব্যবহার — এখনো কোনো ব্যালেন্স রিডিং নেই; রিফ্রেশ করতে খোলো",
     "kiro_credit_usage_config_unreadable": "Kiro ক্রেডিট ব্যবহার — ব্যাকএন্ড সেটিং পড়া যায়নি; আবার চেষ্টা করতে খোলো",
-    "metrics_card_old_data": "শেষ আপডেট ৯০ সেকেন্ডের বেশি আগে",
+    "metrics_card_old_data": "শেষ আপডেট 90 সেকেন্ডের বেশি আগে",
     "metrics_card_fetch_failed": "শেষ মেট্রিক আপডেট ব্যর্থ হয়েছে"
   },
   "appSdk": {
@@ -6900,11 +6900,11 @@
       "ask_the_kiro_crew_owner_to_install_kiro_cli_and": "{{productName}}-এর মালিককে এই গেটওয়েতে Kiro CLI ইনস্টল করে সাইন ইন করতে বলুন। গেটওয়ে প্রস্তুত হওয়ার সাথে সাথেই এই ড্যাশবোর্ড\n          আপনার জন্য খুলে যাবে।",
       "check_again": "আবার পরীক্ষা করুন",
       "check_again_for_kiro_cli": "Kiro CLI আবার পরীক্ষা করো",
+      "check_sign_in_again": "সাইন-ইন আবার পরীক্ষা করো",
       "complete": "সম্পূর্ণ",
       "copied": "কপি হয়েছে",
       "copy_command": "কমান্ড কপি করুন",
       "copy_failed": "কপি করা যায়নি। কমান্ডের টেক্সট বেছে নিয়ে হাতে কপি করো।",
-      "copy_sign_in_command": "সাইন-ইন কমান্ড কপি করুন",
       "could_not_check_kiro_cli": "Kiro CLI পরীক্ষা করা যায়নি।",
       "gateway": "গেটওয়ে",
       "gateway_setup_required": "গেটওয়ে সেটআপ প্রয়োজন",
@@ -7004,7 +7004,7 @@
       "switching_agent": "বদলানো হচ্ছে…",
       "could_not_switch_agent": "{{name}}-এ বদলানো যায়নি। আবার চেষ্টা করো।",
       "could_not_switch_to_kiro": "Kiro CLI-তে ফিরে যাওয়া যায়নি। আবার চেষ্টা করো।",
-      "agent_recheck_failed": "{{name}} আবার পরীক্ষা করা যায়নি। আবার চেষ্টা করো।",
+      "agent_recheck_failed": "{{name}} আবার পরীক্ষা করা যায়নি। 'আবার পরীক্ষা করো' চাপো।",
       "configured_agent_not_ready": "{{productName}} {{name}} ব্যবহারের জন্য সেট করা আছে, কিন্তু এটি এই হোস্টে এখনো প্রস্তুত নয়। নিচে এর ইনস্টলেশন শেষ করো, অথবা এর বদলে Kiro CLI সেট আপ করো।",
       "use_kiro_cli_instead": "এর বদলে Kiro CLI ব্যবহার করো",
       "switch_agent_later_in_settings": "ডেভেলপার > এজেন্ট ব্যাকএন্ড থেকে যেকোনো সময় এজেন্ট বদলাতে পারো।"

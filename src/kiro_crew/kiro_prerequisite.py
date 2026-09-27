@@ -52,7 +52,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from kiro_crew import _process_group_supervisor, hooks, identity_stores, platform_compat
+from kiro_crew import _process_group_supervisor, hooks, identity_stores, platform_compat, sandbox
 from kiro_crew._sqlite_compat import sqlite3
 from kiro_crew.agent_files import AGENT_FILENAME, LITE_AGENT_FILENAME
 from kiro_crew.atomic_write import atomic_write
@@ -637,6 +637,12 @@ class PrerequisiteStatus:
     # fields the two collapse into ``installed=False`` and the dashboard tells
     # the user to install a CLI that is already there and authenticated.
     sandbox_unavailable: bool = False
+    # Host capability independent of Kiro candidate probes. Kiro can delegate
+    # to its own sandbox on Windows; other harnesses need a Crew OS backend.
+    sandbox_backend_available: bool = False
+    # Runtime-enforced harnesses whose credential mask cannot apply at the
+    # effective configured tier, even when an OS backend exists.
+    sandbox_blocked_backends: list[str] = field(default_factory=list)
     # Machine-readable: "transient" | "foreign_sandbox" | "no_backend". The
     # presentation layer maps this to its own translated remedy copy instead of
     # parsing English prose out of ``sandbox_detail``.
@@ -2656,10 +2662,68 @@ class KiroPrerequisiteService:
 
         return self._initial_setup_complete
 
+    async def record_independent_backend_setup(self, backend: str) -> bool:
+        """Persist first-run completion after a selected independent harness is usable.
+
+        A browser-local completion bit cannot admit a later browser or a
+        non-owner dashboard user.  Re-check the server's selectable backend,
+        installation, and sandbox facts before writing the owner-only marker.
+        A probe marked UNKNOWN is not proof of installation or sign-in.
+        """
+        from kiro_crew.acp_backends import selectable_backend_values
+        from kiro_crew.agent_sdk.backend_install import INSTALLED, probe_backend
+        from kiro_crew.agent_sdk.backends import ACP_BACKENDS_INDEPENDENT_SETUP
+
+        if backend not in ACP_BACKENDS_INDEPENDENT_SETUP:
+            return False
+        if backend not in selectable_backend_values():
+            return False
+        state = await asyncio.to_thread(probe_backend, backend)
+        if state.installed != INSTALLED or state.restart_required:
+            return False
+        status = await self._dashboard_snapshot()
+        if (
+            status["sandbox_unavailable"]
+            or not status["sandbox_backend_available"]
+            or backend in status["sandbox_blocked_backends"]
+        ):
+            return False
+        await asyncio.to_thread(self._mark_setup_complete)
+        return True
+
     def _snapshot_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = asdict(self._status)
         # See _LEGACY_IDLE_OPERATION: a pre-upgrade tab crashes without this key.
         result["operation"] = legacy_idle_operation()
+        return result
+
+    async def _dashboard_snapshot(self) -> dict[str, Any]:
+        """Apply host facts to every dashboard response, including repair/update."""
+        result = await self._agent_spec_overlay(self._snapshot_dict())
+        # A missing Kiro candidate cannot produce a sandbox_unavailable verdict,
+        # and Kiro's delegated sandbox does not establish a Crew OS backend for
+        # other harnesses. Use the runtime detector independently, off-loop because
+        # its cold/transient path can probe the host. Test mode never probes it.
+        if self._assume_ready:
+            result["sandbox_backend_available"] = True
+            return result
+
+        def sandbox_facts() -> tuple[bool, list[str]]:
+            from kiro_crew.agent_sdk.backends import registered_backends
+            from kiro_crew.agent_sdk.tool_gate import is_enforced
+
+            available = sandbox.detect_backend() != "none"
+            mask_applies = sandbox.credential_mask_applies(sandbox.configured_sandbox_mode())
+            blocked = (
+                []
+                if mask_applies
+                else sorted(backend for backend in registered_backends() if is_enforced(backend))
+            )
+            return available, blocked
+
+        result["sandbox_backend_available"], result["sandbox_blocked_backends"] = (
+            await asyncio.to_thread(sandbox_facts)
+        )
         return result
 
     @staticmethod
@@ -2806,10 +2870,10 @@ class KiroPrerequisiteService:
         # the spec missing, both rebuild, and the second one regenerates the file
         # the first just wrote. Re-reading inside the lock makes the loser a no-op.
         async with self._repair_lock:
-            before = await self._agent_spec_overlay(self._snapshot_dict())
+            before = await self._dashboard_snapshot()
             missing_before = before.get("missing_agent_specs") or []
             # Read off the latched probe result because acceptance costs a
-            # subprocess and the overlay above is deliberately stat-only.
+            # subprocess and the spec overlay only checks file presence.
             rejected_before = before.get("rejected_agent_specs") or []
             # A REJECTED spec is deliberately NOT rebuilt. The file exists, so a
             # regenerate would drop a concurrent api_mcp_toggle edit to the
@@ -2851,7 +2915,7 @@ class KiroPrerequisiteService:
                         await self._probe(force=True)
                     except Exception:  # noqa: BLE001 — stale state beats a 500
                         logger.warning("Re-probe of rejected agent specs failed", exc_info=True)
-                result = await self._agent_spec_overlay(self._snapshot_dict())
+                result = await self._dashboard_snapshot()
                 if not error and auxiliary_missing and (result.get("missing_agent_specs") or []):
                     error = _SPECS_STILL_MISSING_ERROR
                 result["agent_spec_repair_error"] = error
@@ -2867,7 +2931,7 @@ class KiroPrerequisiteService:
                     await self._probe(force=True)
                 except Exception:  # noqa: BLE001 — a failed re-probe keeps stale state, not a 500
                     logger.warning("Re-probe after agent-spec repair failed", exc_info=True)
-            result = await self._agent_spec_overlay(self._snapshot_dict())
+            result = await self._dashboard_snapshot()
             if not error and (result.get("missing_agent_specs") or []):
                 error = _SPECS_STILL_MISSING_ERROR
             result["agent_spec_repair_error"] = error
@@ -2915,7 +2979,8 @@ class KiroPrerequisiteService:
         """Return the latched status, probing only on an explicit ``force``.
 
         Probing is boot-and-explicit-action only (see :meth:`session_ready`), so
-        an ordinary poll reads latched state and spawns nothing. ``force=True``
+        an ordinary poll reads latched CLI state. The independent OS sandbox
+        capability check uses the shared detector/cache. ``force=True``
         (the gate's Check again, and its blocking-state auto-poll) is the
         supported way to re-probe on demand.
 
@@ -2971,7 +3036,7 @@ class KiroPrerequisiteService:
             # cannot loop -- the probe stamps the new identity, so the next poll
             # compares equal.
             await self._probe(force=True)
-        result = await self._agent_spec_overlay(self._snapshot_dict())
+        result = await self._dashboard_snapshot()
 
         # The repair arm deliberately does NOT live here. This is an ``add_get``
         # route, and both dashboard barriers are method-scoped (csrf_middleware
@@ -3807,7 +3872,7 @@ class KiroPrerequisiteService:
         if self._assume_ready:
             # A test / offline gateway asserts its own readiness and has no real
             # CLI to update; running an update there is meaningless.
-            result = await self._agent_spec_overlay(self._snapshot_dict())
+            result = await self._dashboard_snapshot()
             result["cli_update_error"] = ""
             return result
         # Resolve the binary the way the probe does, off-loop.
@@ -3894,7 +3959,7 @@ class KiroPrerequisiteService:
                 await self._probe(force=True)
             except Exception:  # noqa: BLE001 — stale state beats a 500
                 logger.warning("Re-probe after kiro-cli update failed", exc_info=True)
-        result = await self._agent_spec_overlay(self._snapshot_dict())
+        result = await self._dashboard_snapshot()
         if not error and not result.get("acp_supported", True):
             error = (
                 "The update ran but this kiro-cli still has no `acp` command. "

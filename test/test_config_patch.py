@@ -130,6 +130,148 @@ def _live_state(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
+@pytest.mark.asyncio
+async def test_selecting_installed_independent_agent_persists_first_run_completion(
+    tmp_config, tmp_path, monkeypatch
+) -> None:
+    """A second browser must not depend on the first browser's localStorage."""
+    from kiro_crew import sandbox
+    from kiro_crew.agent_sdk import backend_install
+    from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+
+    data_home = tmp_path / "data-home"
+    service = KiroPrerequisiteService(
+        platform_name="linux",
+        environ={"HOME": str(tmp_path), "PATH": ""},
+        home=tmp_path,
+        data_home=data_home,
+        audit_writer=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(sandbox, "detect_backend", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "configured_sandbox_mode", lambda: "standard")
+    monkeypatch.setattr(sandbox, "credential_mask_applies", lambda _mode: True)
+    monkeypatch.setattr(
+        backend_install,
+        "probe_backend",
+        lambda backend: backend_install.BackendInstallState(
+            backend, backend, backend_install.INSTALLED
+        ),
+    )
+    app = _make_app()
+    app["kiro_prerequisite_service"] = service
+
+    async with TestClient(TestServer(app)) as client:
+        response = await _patch(client, "agent.acp_backend", "claude")
+        assert response.status == 200
+
+    restarted = KiroPrerequisiteService(
+        platform_name="linux",
+        environ={"HOME": str(tmp_path), "PATH": ""},
+        home=tmp_path,
+        data_home=data_home,
+        audit_writer=lambda *_args, **_kwargs: None,
+    )
+    assert restarted.initial_setup_complete is True
+
+
+@pytest.mark.asyncio
+async def test_marker_write_failure_reports_saved_config_without_claiming_setup_complete(
+    tmp_config, tmp_path, monkeypatch
+) -> None:
+    from kiro_crew import sandbox
+    from kiro_crew.agent_sdk import backend_install
+    from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+
+    service = KiroPrerequisiteService(
+        platform_name="linux",
+        environ={"HOME": str(tmp_path), "PATH": ""},
+        home=tmp_path,
+        data_home=tmp_path / "data-home",
+        audit_writer=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(sandbox, "detect_backend", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "configured_sandbox_mode", lambda: "standard")
+    monkeypatch.setattr(sandbox, "credential_mask_applies", lambda _mode: True)
+    monkeypatch.setattr(
+        backend_install,
+        "probe_backend",
+        lambda backend: backend_install.BackendInstallState(
+            backend, backend, backend_install.INSTALLED
+        ),
+    )
+    monkeypatch.setattr(
+        service, "_mark_setup_complete", MagicMock(side_effect=OSError("disk full"))
+    )
+    app = _make_app()
+    app["kiro_prerequisite_service"] = service
+
+    async with TestClient(TestServer(app)) as client:
+        response = await _patch(client, "agent.acp_backend", "claude")
+        assert response.status == 503
+        body = await response.json()
+        assert body["code"] == "setup_marker_write_failed"
+        assert body["config_saved"] is True
+    assert json.loads(tmp_config.read_text(encoding="utf-8"))["agent"]["acp_backend"] == "claude"
+    assert service.initial_setup_complete is False
+
+
+@pytest.mark.asyncio
+async def test_recheck_records_setup_after_configure_then_install(
+    tmp_config, tmp_path, monkeypatch
+) -> None:
+    from kiro_crew import sandbox
+    from kiro_crew.agent_sdk import backend_install
+    from kiro_crew.dashboard.handlers import acp_backend_status
+    from kiro_crew.kiro_prerequisite import KiroPrerequisiteService
+
+    service = KiroPrerequisiteService(
+        platform_name="linux",
+        environ={"HOME": str(tmp_path), "PATH": ""},
+        home=tmp_path,
+        data_home=tmp_path / "data-home",
+        audit_writer=lambda *_args, **_kwargs: None,
+    )
+    installed = False
+    monkeypatch.setattr(sandbox, "detect_backend", lambda: "bwrap")
+    monkeypatch.setattr(sandbox, "configured_sandbox_mode", lambda: "standard")
+    monkeypatch.setattr(sandbox, "credential_mask_applies", lambda _mode: True)
+    monkeypatch.setattr(
+        backend_install,
+        "probe_backend",
+        lambda backend: backend_install.BackendInstallState(
+            backend,
+            backend,
+            backend_install.INSTALLED if installed else backend_install.MISSING,
+        ),
+    )
+    monkeypatch.setattr(
+        acp_backend_status,
+        "_recheck",
+        lambda backend: {"id": backend, "installed": backend_install.INSTALLED},
+    )
+    app = _make_app()
+    app["kiro_prerequisite_service"] = service
+    app.router.add_post("/api/acp-backends/recheck", acp_backend_status.api_acp_backend_recheck)
+
+    async with TestClient(TestServer(app)) as client:
+        response = await _patch(client, "agent.acp_backend", "claude")
+        assert response.status == 200
+        assert service.initial_setup_complete is False
+        installed = True
+        mark_setup_complete = service._mark_setup_complete
+        monkeypatch.setattr(
+            service, "_mark_setup_complete", MagicMock(side_effect=OSError("disk full"))
+        )
+        response = await client.post("/api/acp-backends/recheck", json={"backend": "claude"})
+        assert response.status == 503
+        assert (await response.json())["code"] == "setup_marker_write_failed"
+        assert service.initial_setup_complete is False
+        monkeypatch.setattr(service, "_mark_setup_complete", mark_setup_complete)
+        response = await client.post("/api/acp-backends/recheck", json={"backend": "claude"})
+        assert response.status == 200
+    assert service.initial_setup_complete is True
+
+
 # ── Per-role models (agent.role_models.*) ─────────────────────────────────
 
 

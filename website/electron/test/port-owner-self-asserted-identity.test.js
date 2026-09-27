@@ -78,6 +78,21 @@ const OCCUPANCY_SITES = [
 // so the guard can tell them from an occupancy decision that has drifted.
 const IDENTITY_SITES = [
   {
+    what: "handoff: classify the successor by the port holder's claimed identity",
+    code: 'const owner = await probeGatewayPortOwner(expectPort);\n      if (owner === "kirocrew" || owner === "service") return "confirm";\n      if (owner === "foreign") return "foreign";\n      if (owner === "unknown") {',
+    times: 1,
+  },
+  {
+    what: "handoff: a foreign successor is denied after identity classification",
+    code: 'if (verdict === "foreign") {',
+    times: 1,
+  },
+  {
+    what: "boot: a foreign local owner must not be reused",
+    code: 'if (decision.action === "reuse" && localOwner === "foreign" && !remoteHost) {',
+    times: 1,
+  },
+  {
     what: "the exported primary-port probe hands the verdict to the IPC gate",
     code: 'return probeGatewayPortOwner(PORT);',
     times: 1,

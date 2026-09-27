@@ -51,6 +51,7 @@ OTHER = "other-agent"
 
 def _fake_config(names, default=CREW):
     return SimpleNamespace(
+        agent=SimpleNamespace(acp_backend="", member_acp_backend=""),
         agents={name: KiroCrewAgentConfig(kiro_agent="kirocrew") for name in names},
         default_agent=default,
         memory_stores={},

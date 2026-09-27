@@ -979,6 +979,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   const selectionCapabilities = selectionCapabilitiesQ.data?.known
     ? selectionCapabilitiesQ.data
     : undefined
+  // The server resolves cold member slots through their member backend. Hide
+  // destructive history controls whenever that backend cannot verify a rerun.
+  const historyRerunSupported = selectionCapabilitiesQ.data?.history_rerun_supported !== false
   const hiddenModelsQ = useModelPickerHiddenModelsQuery()
   const hiddenModelIds = hiddenModelsQ.data
   const modelPickerConfigured = useModelPickerConfigured()
@@ -4270,7 +4273,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // with is over, so the old reason would now describe a state that passed.
   useEffect(() => { if (slotRunning) setRefusedPress(null) }, [slotRunning])
   const handleRegenerate = useCallback(() => {
-    if (!activeSlot || regenerating || slotRunning || activeSlotRemoteBound) return
+    if (!activeSlot || regenerating || slotRunning || activeSlotRemoteBound || !historyRerunSupported) return
     // Mirror the server's scan exactly (chat_regenerate.py): the turn being
     // regenerated ends at the last assistant row BY ROLE — hidden
     // invisible-only rows included — so this optimistic truncation cannot
@@ -4302,7 +4305,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       dispatch(replaceMessages(snapshot))
       setRegenerating(false)
     })
-  }, [activeSlot, regenerating, slotRunning, activeSlotRemoteBound, messages, dispatch, showRefusedPress])
+  }, [activeSlot, regenerating, slotRunning, activeSlotRemoteBound, historyRerunSupported, messages, dispatch, showRefusedPress])
 
   // ---- Continue the thread ---------------------------------------------------
   // A turn can end without the assistant handing the floor back: the connection
@@ -4470,7 +4473,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   }, [activeSlot, boundStore, dispatch, showActionError])
 
   const handleEditResend = useCallback((index: number, ts: string, newContent: string) => {
-    if (!activeSlot || slotRunning || activeSlotRemoteBound) return
+    if (!activeSlot || slotRunning || activeSlotRemoteBound || !historyRerunSupported) return
     const snapshot = [...messages]
     dispatch(truncateAfterIndex(index))
     dispatch(appendMessage({ role: 'user', content: newContent, cls: '', ts: new Date().toISOString() }))
@@ -4483,7 +4486,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       dispatch(replaceMessages(snapshot))
       setRegenerating(false)
     })
-  }, [activeSlot, slotRunning, activeSlotRemoteBound, messages, dispatch])
+  }, [activeSlot, slotRunning, activeSlotRemoteBound, historyRerunSupported, messages, dispatch])
 
   const searchCtxValue = useMemo(() => ({
     term: search.term,
@@ -5926,7 +5929,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               timestamp={chatConfig.showTimestamps ? msgTime : undefined}
               timestampTitle={msgTimeFull}
               renderContent={renderUserContentCb}
-              canEdit={!slotRunning && !regenerating && !!activeSlot && !activeSlotRemoteBound}
+              canEdit={!slotRunning && !regenerating && !!activeSlot && !activeSlotRemoteBound && historyRerunSupported}
               slotRunning={slotRunning}
               messageIndex={i}
               messageTs={m.ts || ''}
@@ -6000,7 +6003,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 const stats = (m.meta as Record<string, unknown> | undefined)?.turn_stats as TurnStats | undefined
                 if (stats && (stats.elapsed_ms ?? 0) > 0) return true
                 return !slotRunning
-              })()} onSpeak={handleSpeak} onRegenerate={i === lastTextIdxRef.current && !slotRunning && !regenerating && activeSlot && !activeSlotRemoteBound ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdxRef.current && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
+              })()} onSpeak={handleSpeak} onRegenerate={i === lastTextIdxRef.current && !slotRunning && !regenerating && activeSlot && !activeSlotRemoteBound && historyRerunSupported ? handleRegenerate : undefined} variants={m.variants} variantIdx={m.variant_idx} onSwitchVariant={i === lastTextIdxRef.current && m.variants && m.variants.length > 1 && activeSlot ? (idx: number) => { api.switchVariant(activeSlot, idx).catch((e: unknown) => {
                 showRefusedPress('switch_variant', e)
               }) } : undefined} onFork={embedded && !popout ? undefined : handleFork} onPlanFromHere={embedded && !popout ? undefined : handlePlanFromHere} forkIndex={forkIndex} forkMessageId={canResolveOnServer ? messageId : undefined} onLoadEarlier={cursorIsForActiveSlot ? handleLoadEarlier : undefined} loadingOlder={loadingOlder} earlierRemaining={slotOldestIndex} onApplyPlan={handleApplyPlan} />
             </div>
@@ -6086,7 +6089,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       bubble,
     ])
     return { renderers, fallback: bubble }
-  }, [slotRunning, handleFileOpen, handleArtifactOpen, selectSessionTab, sessionTitles, connected, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, activeSlotRemoteBound, handleRegenerate, handleEditResend, slotHasMore, loadingOlder, cursorIsForActiveSlot, slotOldestIndex, handleLoadEarlier, renderUserContentCb, highlightTs, activeSlotTitle, mode, embedded, popout, handleOpenDiff, handlePlanFromHere, planTaskId, artifactPaths, automationId, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, socialShareOn, voiceRecoverySlot, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage, showRefusedPress, transcriptHot, revealAppInPanel, continuable, interrupted, continuing, handleContinue, openModelPickerFromError, openDefaultModelSetting, openKiroSignIn, openMemberCapabilities, handleFolderOpen, handleSpeak, handleApplyPlan, mcpAppPanel, redactionCoachTs])
+  }, [slotRunning, handleFileOpen, handleArtifactOpen, selectSessionTab, sessionTitles, connected, handleFork, handleQuote, handleAsk, chatConfig, activeSlot, regenerating, activeSlotRemoteBound, historyRerunSupported, handleRegenerate, handleEditResend, slotHasMore, loadingOlder, cursorIsForActiveSlot, slotOldestIndex, handleLoadEarlier, renderUserContentCb, highlightTs, activeSlotTitle, mode, embedded, popout, handleOpenDiff, handlePlanFromHere, planTaskId, artifactPaths, automationId, toolDisclosure, setToolDisclosureFor, linkPreviewsOn, socialShareOn, voiceRecoverySlot, handleSubagentPanelOpen, isPinned, handleTogglePinForMessage, showRefusedPress, transcriptHot, revealAppInPanel, continuable, interrupted, continuing, handleContinue, openModelPickerFromError, openDefaultModelSetting, openKiroSignIn, openMemberCapabilities, handleFolderOpen, handleSpeak, handleApplyPlan, mcpAppPanel, redactionCoachTs])
 
   const renderMessage = useCallback((i: number, m: ChatMessage) => {
     // Key identity rules (clientTs preference + streaming->assistant role

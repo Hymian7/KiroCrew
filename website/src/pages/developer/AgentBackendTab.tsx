@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react'
 
+import { acpBackendName } from '../../api/acpBackend'
 import { api } from '../../api/client'
 import type { AcpBackendProbe } from '../../api/client'
 import ErrorBoundary from '../../components/ErrorBoundary'
@@ -709,18 +710,6 @@ export function AgentBackendTab() {
     return lines
   }
 
-  /**
-   * Translated display names for the agents this frontend knows by name.
-   *
-   * Deliberately NOT the list of agents the panel renders — see `candidates`. An id
-   * absent here still gets a row; `nameOf` falls back to the server's `policy_id`.
-   */
-  const NAME: Record<string, string> = {
-    [KIRO]: i18nT('pages.developer.agentBackendTab.kiro_cli'),
-    [CLAUDE]: i18nT('pages.developer.agentBackendTab.claude_code'),
-    [KAS]: i18nT('pages.developer.agentBackendTab.kas_kiro_agent'),
-  }
-
   const ICON: Record<string, React.ReactNode> = {
     [KIRO]: <Terminal size={14} />,
     [CLAUDE]: <Sparkles size={14} />,
@@ -894,15 +883,15 @@ export function AgentBackendTab() {
    * human-readable wire name (`acp_backends.POLICY_ID_BY_BACKEND`) — it is what a
    * governance rule spells, so it is already a word rather than an internal token.
    * Untranslated, and that is the deliberate trade: a registered agent rendering
-   * under its policy name is legible, whereas `NAME[value]` returning `undefined`
+   * under its policy name is legible, whereas a missing display name
    * renders a row with no text at all. A core agent that ships selectable gets a
-   * real translated entry above; this keeps a plugin-registered one usable until
+   * real translated entry in the shared helper; this keeps a plugin-registered one usable until
    * then.
    *
    * KIRO is the empty string, so the `||` chain must not treat it as absent — it is
-   * always in NAME, which is why the lookup comes first.
+   * always named by the shared helper, before the policy-id fallback.
    */
-  const nameOf = (value: string): string => NAME[value] || probe(value)?.policy_id || value
+  const nameOf = (value: string): string => acpBackendName({ id: value, policy_id: probe(value)?.policy_id })
 
   /** Generic mark for an agent this frontend has no icon for. */
   const iconOf = (value: string): React.ReactNode => ICON[value] ?? <Boxes size={14} />

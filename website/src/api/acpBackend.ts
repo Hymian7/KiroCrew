@@ -1,3 +1,5 @@
+import { i18nT } from '../i18n/t'
+
 /**
  * Which agent harness the gateway runs, read off `agent.acp_backend` in the
  * `/api/config/kirocrew` body (the `['kirocrewConfig']` query).
@@ -25,4 +27,14 @@ export interface AcpBackendConfig {
 export function isKiroBackend(cfg: AcpBackendConfig | undefined): boolean {
   if (cfg === undefined) return false
   return (cfg.agent?.acp_backend ?? ACP_BACKEND_KIRO) === ACP_BACKEND_KIRO
+}
+
+/** Shared translated harness labels; unknown harnesses keep the server's policy name. */
+export function acpBackendName(backend: { id: string; policy_id?: string }): string {
+  switch (backend.id) {
+    case ACP_BACKEND_KIRO: return i18nT('pages.developer.agentBackendTab.kiro_cli')
+    case 'claude': return i18nT('pages.developer.agentBackendTab.claude_code')
+    case 'kas': return i18nT('pages.developer.agentBackendTab.kas_kiro_agent')
+    default: return backend.policy_id || backend.id
+  }
 }

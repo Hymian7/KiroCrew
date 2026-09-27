@@ -17,7 +17,7 @@ from kiro_crew.dashboard.chat_utils import (
     slot_history_key,
     variant_from_row,
 )
-from kiro_crew.dashboard.kiro_readiness import reject_if_kiro_unverified
+from kiro_crew.dashboard.kiro_readiness import reject_if_configured_backend_unverified
 from kiro_crew.dashboard.remote_relay import remote_bound_refusal
 from kiro_crew.dashboard.state import DashboardState, _ChatSlot
 from kiro_crew.dashboard.system_notices import is_system_notice
@@ -70,12 +70,6 @@ def _destructive_history_busy(slot: "_ChatSlot") -> web.Response | None:
 
 async def api_chat_slot_regenerate(request: web.Request) -> web.Response:
     """POST /api/chat/slots/{slot}/regenerate — regenerate the last assistant reply."""
-    # Destructive: this truncates and PERSISTS history before the background
-    # turn runs, so a failed turn cannot undo it. Unlike an ordinary send, the
-    # readiness latch must be honored BEFORE the mutation.
-    blocked = await reject_if_kiro_unverified(request)
-    if blocked is not None:
-        return blocked
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
     slot = state._slots.get(name)
@@ -84,6 +78,13 @@ async def api_chat_slot_regenerate(request: web.Request) -> web.Response:
     under_construction = reject_if_slot_under_construction(state, slot)
     if under_construction is not None:
         return under_construction
+    # This mutates durable history before the turn. Resolve the target slot's
+    # member-aware backend before the readiness check, not the default backend.
+    blocked = await reject_if_configured_backend_unverified(
+        request, session_key=effective_session_key(slot)
+    )
+    if blocked is not None:
+        return blocked
 
     # A crew-bound slot has no local regenerate: it would truncate LOCAL history
     # and re-run the turn on this machine, diverging from the peer.
@@ -386,22 +387,12 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
         _subagents_attached_response,
     )
 
-    # Destructive: this truncates and PERSISTS history before the background
-    # turn runs, so a failed turn cannot undo it. Unlike an ordinary send, the
-    # readiness latch must be honored BEFORE the mutation.
-    blocked = await reject_if_kiro_unverified(request)
-    if blocked is not None:
-        return blocked
     state: DashboardState = request.app["state"]
     name = request.match_info["slot"]
     slot = state._slots.get(name)
     request_app = request.get("app", "")
     if not slot:
         return web.json_response({"error": "not found", "code": "slot_not_found"}, status=404)
-    under_construction = reject_if_slot_under_construction(state, slot)
-    if under_construction is not None:
-        return under_construction
-
     # App-ownership gate (App Kit §5.2). This endpoint discards the slot's
     # NATIVE ACP conversation below, so an app token reaching a slot it does not
     # own destroys a resume identity it has no claim on -- the same capability
@@ -416,6 +407,17 @@ async def api_chat_slot_edit_resend(request: web.Request) -> web.Response:
     denied = _check_slot_app_ownership(slot, name, request_app, "chat.slot_edit_resend")
     if denied is not None:
         return denied
+    under_construction = reject_if_slot_under_construction(state, slot)
+    if under_construction is not None:
+        return under_construction
+    # Resolve the member-aware backend only after the ownership 404. Otherwise
+    # a foreign app could distinguish an existing non-Kiro slot from a missing
+    # slot by its backend-specific readiness response.
+    blocked = await reject_if_configured_backend_unverified(
+        request, session_key=effective_session_key(slot)
+    )
+    if blocked is not None:
+        return blocked
 
     # A crew-bound slot has no local edit-and-resend: it would truncate LOCAL
     # history and re-run the edited turn on this machine, diverging from the peer.
