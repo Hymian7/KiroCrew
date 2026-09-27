@@ -459,10 +459,14 @@ describe("crew webview containment", () => {
     // The mint for the NEW record fails, so `url` keeps pointing at the document
     // minted above while `published_at` advances underneath it.
     //
-    // Day-scale rather than seconds-scale on purpose: the assertions below compare
-    // the component's rendering against one this test computes a moment later, and
-    // a minute-scale age can tick between the two. Three days does not.
-    const republished = new Date(Date.now() - 3 * 86400_000).toISOString();
+    // Hour-scale, for two reasons. It does not tick: the assertions below compare
+    // the component's rendering against one this test computes a moment later, so
+    // a seconds- or minute-scale age could roll over between the two. And it
+    // renders a different UNIT from the fixture's age, which is what keeps the
+    // two strings out of the substring relation the guard below now enforces --
+    // a day-scale republish read "3d ago" against a fixture that reached
+    // "23d ago", and `not.toContain` cannot tell a suffix from a match.
+    const republished = new Date(Date.now() - 5 * 3600_000).toISOString();
     const body = panelBody();
     mintSpy.mockRejectedValue(new Error("mint_500"));
     client.setQueryData(["member-panel", SLUG, CREW], {
@@ -481,12 +485,21 @@ describe("crew webview containment", () => {
 
     /* Non-vacuity first: the two instants must actually RENDER differently, or
      * "does not show the new age" would hold for the wrong reason and the pin
-     * would survive the defect. They cannot collide whenever this is run -- the
-     * fixture's instant is a fixed date and so only ever gets older, while the
-     * republish is pinned three days out from the clock. */
+     * would survive the defect.
+     *
+     * The guard is mutual NON-CONTAINMENT, not inequality, because that is the
+     * relation the assertions below actually need: they read one whole sentence
+     * with `toContain`, so an age that merely ends with the other one already
+     * defeats them. The fixture's instant is fixed and so only ever gets older,
+     * while the republish is pinned to the clock -- inequality alone therefore
+     * held on the day the fixture reached "23d ago" and the assertion failed
+     * anyway. Asserting the real relation fails here instead, next to the
+     * offsets a reader can change. */
     const shownWhen = fmtRelative("2026-09-04T05:16:00");
     const newWhen = fmtRelative(republished);
     expect(newWhen).not.toBe(shownWhen);
+    expect(shownWhen).not.toContain(newWhen);
+    expect(newWhen).not.toContain(shownWhen);
 
     const text = banner.textContent || "";
     expect(text).toContain(shownWhen);
