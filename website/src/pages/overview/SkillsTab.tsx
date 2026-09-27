@@ -848,10 +848,19 @@ function PendingCandidateRow({ p, autoOpen, approveRefusal, mixedQueue, onApprov
       )}
       {open && detailReadError && (
         /* The read that would confirm this candidate failed, so Approve is held
-           and the panel below is the last good read rather than the file. */
+           and the panel below is the last good read rather than the file.
+           `pending_skill_unreadable` is the one failure whose server prose a
+           user cannot act on: the candidate is still listed, so the generic
+           notice would leave them clicking a row that keeps 404ing. The
+           translated copy names the state and the action that applies. */
         <div className="mt-2">
           <ErrorNotice
-            message={detailReadError.message}
+            message={
+              parseErrorCode((detailReadError as { body?: string }).body ?? '')
+                === 'pending_skill_unreadable'
+                ? i18nT('pages.overview.skillsTab.detail_unreadable')
+                : detailReadError.message
+            }
             askAgent
             askAgentLabel={i18nT('pages.overview.skillsTab.ask_agent_about_failure')}
           />
