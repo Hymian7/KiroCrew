@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { addPendingFile, extendsConsumably, findMentionRanges, findUnreferencedAttachments, mentionBoundary, mentionBoundaryFor, mentionTokenRegex, prepareSendPayload, buildFileLabels, resolveFileSegment, mdImageDest, mdImageDestToPath, restoreQueuedContent, restoreUnreferencedImages, serializeDirTokens } from '../utils/fileTokens'
+import { addPendingFile, excisionSpan, extendsConsumably, findMentionRanges, findUnreferencedAttachments, mentionBoundary, mentionBoundaryFor, mentionTokenRegex, prepareSendPayload, buildFileLabels, resolveFileSegment, mdImageDest, mdImageDestToPath, restoreQueuedContent, restoreUnreferencedImages, serializeDirTokens } from '../utils/fileTokens'
 
 describe('buildFileLabels uniqueness', () => {
   it('disambiguates paths that share a basename', () => {
@@ -317,6 +317,54 @@ describe('addPendingFile canonical dedupe', () => {
     expect(addPendingFile(['/tmp/a.ts'], '/tmp/b.ts')).toEqual(['/tmp/a.ts', '/tmp/b.ts'])
     // `\` is a legal POSIX filename character, not a separator.
     expect(addPendingFile(['/tmp/weird\\name.txt'], '/tmp/weird\\name.txt')).toEqual(['/tmp/weird\\name.txt'])
+  })
+})
+
+describe('excisionSpan: the one deletion primitive', () => {
+  // ranges for `intro @src/main.ts:42 tail` with alias `@src/main.ts`
+  const text = 'intro @src/main.ts:42 tail'
+  const mention = { start: 6, end: 18, alias: '@src/main.ts' }
+
+  it('a span cutting INTO a mention takes it whole, both sides, plus the suffix', () => {
+    // backward line-delete shape: [0, interior-caret)
+    let r = excisionSpan(text, [mention], 0, 13)
+    expect([r.cutStart, r.cutEnd]).toEqual([0, 21])
+    // forward shape: [interior-caret, end)
+    r = excisionSpan(text, [mention], 13, text.length)
+    expect([r.cutStart, r.cutEnd]).toEqual([6, text.length])
+  })
+
+  it('a wholly covered mention carries its :line suffix past the span end', () => {
+    const r = excisionSpan(text, [mention], 6, 18)
+    expect([r.cutStart, r.cutEnd]).toEqual([6, 21])
+    expect(r.covered).toHaveLength(1)
+  })
+
+  it('the suffix is consumed against a closing wrapper too', () => {
+    const t = 'see (@src/main.ts:42) here'
+    const m = { start: 5, end: 17, alias: '@src/main.ts' }
+    const r = excisionSpan(t, [m], 5, 17)
+    expect(r.cutEnd).toBe(20) // consumes `:42`, stops before `)`
+  })
+
+  it('a paste range partially cut is NOT expanded (base paste-rail behavior)', () => {
+    const t = 'aa [ Paste #1 · 3 lines ] bb'
+    const paste = { start: 3, end: 25 } // no alias
+    const r = excisionSpan(t, [paste], 0, 10)
+    expect([r.cutStart, r.cutEnd]).toEqual([0, 10])
+    expect(r.covered).toHaveLength(0)
+  })
+
+  it('whitespace around the cut is never touched and a no-op span stays a no-op', () => {
+    const r = excisionSpan(text, [mention], 0, 5)
+    expect([r.cutStart, r.cutEnd]).toEqual([0, 5])
+  })
+
+  it('a mention with no consumable suffix widens only to its own end', () => {
+    const t = 'check @src/main.ts now'
+    const m = { start: 6, end: 18, alias: '@src/main.ts' }
+    const r = excisionSpan(t, [m], 10, 12)
+    expect([r.cutStart, r.cutEnd]).toEqual([6, 18])
   })
 })
 

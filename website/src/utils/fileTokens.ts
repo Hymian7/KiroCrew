@@ -473,20 +473,61 @@ export const leadingMentionBoundary = /(?:^|\s)[($[{`"']?/.source
 export interface MentionRange { start: number; end: number; alias: string }
 
 /** Trailing `file:line` suffix the remove-chip strip consumes with a mention,
- *  so no bare `:42` is left behind. Same lookahead class as
+ *  so no bare `:42` is left behind; a whole-mention removal in the composer
+ *  (`excisionSpan`) consumes it the same way. Same lookahead class as
  *  `mentionBoundary`'s punctuation run, so a wrapped `(@a.ts:42)` counts. */
 export const MENTION_LINE_SUFFIX = /^:\d+(?=\s|$|[,.!?;:)\]}`"'])/
 
+export interface AtomSpan { start: number; end: number; alias?: string }
+
+/** Widen a raw deletion span `[start,end)` so it never cuts a picked mention
+ *  apart, given the composer's sorted, non-overlapping token ranges:
+ *  (a) a MENTION range the span cuts into is taken whole (a mention has no
+ *      editable interior, so no gesture can leave a half-edited spelling that
+ *      no recorded alias matches -- the file would silently drop off the
+ *      message while its edited text was still sent);
+ *  (b) a mention wholly inside the widened span carries its `:line` suffix out
+ *      with it, so no bare `:42` is stranded as message text.
+ *  Paste-token ranges are NOT expanded here: their bounds stay exactly what
+ *  the calling gesture computed (base behavior); they ride along only so the
+ *  caller can prune the records of the ones it removed. Whitespace is never
+ *  touched. One forward pass suffices: ranges are sorted and disjoint, and a
+ *  suffix (`:` + digits) can never contain the `@` a later range starts with,
+ *  so an expansion can never newly cut a range already passed. */
+export function excisionSpan(text: string, ranges: readonly AtomSpan[], start: number, end: number):
+  { cutStart: number; cutEnd: number; covered: AtomSpan[] } {
+  let cutStart = start, cutEnd = end
+  const covered: AtomSpan[] = []
+  for (const r of ranges) {
+    if (r.end <= cutStart || r.start >= cutEnd) continue
+    if (r.alias !== undefined) {
+      if (r.start < cutStart) cutStart = r.start
+      if (r.end > cutEnd) cutEnd = r.end
+    }
+    if (r.start >= cutStart && r.end <= cutEnd) {
+      covered.push(r)
+      if (r.alias !== undefined) {
+        const m = MENTION_LINE_SUFFIX.exec(text.slice(r.end))
+        if (m && r.end + m[0].length > cutEnd) cutEnd = r.end + m[0].length
+      }
+    }
+  }
+  return { cutStart, cutEnd, covered }
+}
+
 /** Every occurrence of each recorded `@alias` mention in `text`, in document
- *  order, non-overlapping. "Add to chat" uses these spans to keep its
- *  caret insertion from splicing a new mention into the middle of an
- *  existing one, which would break that mention and unstage its file.
+ *  order, non-overlapping. The composer treats each range as ONE unit: the
+ *  caret can never rest inside it, and Backspace/Delete on or inside it
+ *  removes the whole literal (`excisionSpan`), so a picked mention has no
+ *  hand-edited form. "Add to chat" also uses these spans to keep its caret
+ *  insertion from splicing a new mention into an existing one.
  *
  *  `aliases` are the literal recorded strings including the leading `@`.
  *  Boundaries are the same `leadingMentionBoundary`/`mentionBoundary` pair
  *  the reconciliation uses, so a span found here is exactly a span the
  *  staleness check counts as a live mention. A trailing `:42` file:line
- *  suffix is a BOUNDARY, not part of the range.
+ *  suffix is a BOUNDARY, not part of the range: only whole-mention removal
+ *  consumes it.
  *  Aliases are tried longest-first and an occurrence overlapping an already
  *  claimed span is dropped, so when one recorded alias is a prefix of
  *  another the longer, more specific token wins its span. */

@@ -1110,6 +1110,29 @@ describe('ChatPage file-chip remove parity', { timeout: 15_000 }, () => {
     expect(ta.value).toBe('please check @main.ts ')
   })
 
+  it('one Backspace at the end of a picked mention removes the whole mention and its chip, never a half-edited reference', async () => {
+    // The bug: Backspace deleted one character, `@src/main.ts` became
+    // `@src/main.t`, the chip unstaged, and the message went out naming a
+    // file with none attached. The mention is one unit now, so the same
+    // keystroke removes the whole literal and the chip together.
+    const store = makeStore('slot-a', [{ key: 'slot-a', project: '/repo' }])
+    await renderPage(store)
+    act(() => { store.dispatch(openActivityPanel()) })
+    fireEvent.click(await screen.findByText('Add to chat: main.ts'))
+    await screen.findByLabelText('Remove')
+    const ta = screen.getByLabelText('Message input') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'please review @src/main.ts for the bug' } })
+    await screen.findByLabelText('Remove')
+
+    const end = ta.value.indexOf('@src/main.ts') + '@src/main.ts'.length
+    ta.setSelectionRange(end, end)
+    fireEvent.keyDown(ta, { key: 'Backspace' })
+
+    await waitFor(() => expect(ta.value).toBe('please review  for the bug'))
+    expect(ta.value).not.toContain('@src/main.t')
+    await waitFor(() => expect(screen.queryByLabelText('Remove')).toBeNull())
+  })
+
   it('an ambiguous shortened form never keeps a file staged: only the untouched exact mention survives', async () => {
     // With both /repo/src/main.ts and /repo/other/src/main.ts staged, a
     // hand-typed `@main.ts` matches no recorded alias for either file --

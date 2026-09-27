@@ -2018,8 +2018,8 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   //   restore:  mergeSlotTokens <- transport-failure, queued-cancel stash,
   //             create-failure (all three recovery arms restore aliases)
   //   clear:    send-clear (captures sentSlotTokens first), slot teardown
-  //   read:     reconciliation effect, insertion clamp,
-  //             remove-chip strip, send-boundary replaceTokens
+  //   read:     reconciliation effect, insertion clamp, mentionTokens render
+  //             map, remove-chip strip, send-boundary replaceTokens
   //   outside:  fileDrafts persistence (reload/cross-tab, #11256), steer
   //             (attachments discarded by design), split-view pane (no
   //             alias consumer -- see ChatPane's restoreDraft adapter)
@@ -3853,6 +3853,38 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
       return revived.reduce((acc, p) => addPendingFile(acc, p), next)
     })
   }, [input, currentSlotTokens, relMentionedHere])
+
+  // The exact recorded alias strings for currently-STAGED picker files,
+  // handed to the composer so it treats each occurrence as ONE unit:
+  // Backspace/Delete on or inside one removes the whole `@rel` -- the
+  // reconciliation above then unstages the chip, since no recorded alias
+  // remains -- and the caret can never rest inside. Without this a
+  // hand-edit (one Backspace at the end, a shortened path) turned the
+  // mention into a spelling no alias matches, and the file silently
+  // dropped off the message while its edited `@…` text was still sent.
+  // Both separator renditions ride along on a Windows-shaped project,
+  // matching `relMentionedHere`'s fold, so a pasted alt-spelling mention the
+  // reconciliation counts as live is one unit too. Computed per render, not
+  // memoized: `pickedFileTokens` is a ref, and every recording arrives with
+  // a state change (a pick stages the file), so the read is never stale and
+  // the arrays involved are a handful of entries.
+  const mentionTokens: string[] = []
+  {
+    const slotTokens = currentSlotTokens()
+    if (slotTokens) {
+      const projectWinShaped = isWindowsShapedPath(currentProjectRef.current || '')
+      const seen = new Set<string>()
+      for (const p of pendingFiles) {
+        for (const t of slotTokens[p] ?? []) {
+          if (!seen.has(t)) { seen.add(t); mentionTokens.push(t) }
+          if (projectWinShaped) {
+            const flipped = t.includes('\\') ? t.replace(/\\/g, '/') : t.replace(/\//g, '\\')
+            if (!seen.has(flipped)) { seen.add(flipped); mentionTokens.push(flipped) }
+          }
+        }
+      }
+    }
+  }
 
   // ── Follow-up card actions (suggest_followup MCP tool) ───────────────────
   // Both routes PRE-FILL a composer and stop; neither sends. `setPendingInput`
@@ -8419,6 +8451,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               collapsible
               uploading={uploading}
               pendingFiles={pendingFiles}
+              mentionTokens={mentionTokens}
               pendingDirs={pendingDirs}
               resizedInfo={resizedInfo}
               onRemoveFile={p => {
