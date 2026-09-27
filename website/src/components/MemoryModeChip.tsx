@@ -73,8 +73,8 @@ export function MemoryModeChip({ memoryMode, onSwitchMode }: MemoryModeChipProps
         data-testid="memory-mode-chip"
         className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[12px] transition-colors cursor-pointer ${
           ephemeralActive
-            ? 'border-warn bg-warn-subtle text-warn'
-            : 'border-border bg-card text-muted hover:border-accent hover:text-text'
+            ? 'glass-pane glass-pane-warn text-warn'
+            : 'glass-pane glass-pane-hover text-muted hover:text-text'
         }`}
         onClick={() => {
           if (!ephemeralActive) setOpen(!open)

@@ -1,12 +1,13 @@
 /**
- * The composer sits on a Liquid Glass pane: `--glass-tint` over the blurred
- * transcript, a 1px lit rim instead of the wrapper's own border, and the
- * composer halo for depth. The wrapper's surface therefore goes transparent so
- * the pane shows through -- except while an approval box is fused to its top,
- * when it returns to the solid surface (the pane has rounded top corners and
- * the fused wrapper does not, so a transparent wrapper would show the transcript
- * through two notches). The pane stays mounted in both states: toggling it
- * would remount the editor and drop the draft's focus when an approval lands.
+ * The composer sits inside ONE Liquid Glass dock pane (`composer-dock`, built
+ * from components/Glass.tsx): `--glass-tint` over the blurred transcript, the
+ * `--glass-edge` hairline on the pane's outer box, and the composer halo for
+ * depth. The pane also holds an approval bar fused to the composer's top and the
+ * collapsed bar, so those share the material instead of meeting it at a seam;
+ * the wrapper's own surface and border are therefore transparent in every mode
+ * (an incognito / temporary session still paints its coloured border). The pane
+ * is always mounted: toggling it would remount the editor and drop the draft's
+ * focus when an approval lands.
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -20,20 +21,22 @@ import type { RootState } from '../store'
 
 const INDEX_CSS = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf-8')
 
+const dockOf = (wrapper: HTMLElement) => wrapper.closest('[data-testid="composer-dock"]') as HTMLElement
+
 describe('composer liquid glass', () => {
-  it('keeps the wrapper transparent so the glass pane shows through', () => {
+  it('keeps the wrapper transparent so the dock pane shows through', () => {
     renderWithProviders(<ChatInput value="" onChange={vi.fn()} onSend={vi.fn()} />)
     const wrapper = screen.getByTestId('input-wrapper')
     expect(wrapper.className).toContain('bg-transparent')
-    expect(wrapper.className).toContain('border-[color:var(--glass-edge)]')
+    expect(wrapper.className).toContain('border-transparent')
     expect(wrapper.className).not.toContain('bg-bg-elevated')
   })
 
-  // With an approval box fused above, the wrapper goes back to a solid surface
-  // and its plain border — and keeps the focus-within accent brightening, which
-  // is the composer's only focus cue in that state (the halo is off while an
-  // approval is attached and the textarea has no outline of its own).
-  it('returns to a solid surface with the focus cue intact while an approval is attached', () => {
+  // With an approval box fused above, the bar and the composer share the ONE
+  // dock pane: the wrapper stays transparent (no seam, no notch), keeps its
+  // focus-within accent brightening, and the dock swaps its halo for the
+  // approval glow so the pending decision is what lights up.
+  it('keeps the wrapper on the shared pane and lights the approval glow while an approval is attached', () => {
     const store = createTestStore({
       chat: {
         activeSlot: 'slot-1',
@@ -60,39 +63,46 @@ describe('composer liquid glass', () => {
     })
     renderWithProviders(<ChatInput value="" onChange={vi.fn()} onSend={vi.fn()} />, { store })
     const wrapper = screen.getByTestId('input-wrapper')
-    expect(wrapper.className).toContain('bg-bg-elevated')
-    expect(wrapper.className).toContain('border-border')
+    expect(wrapper.className).toContain('bg-transparent')
     expect(wrapper.className).toContain('focus-within:border-accent/50')
-    expect(wrapper.className).not.toContain('bg-transparent')
+    expect(wrapper.className).not.toContain('bg-bg-elevated')
+    const dock = dockOf(wrapper)
+    expect(dock.className).toContain('approval-glow')
+    expect(dock.className).not.toContain('composer-halo')
+    expect(screen.getByRole('button', { name: /allow once/i })).toBeTruthy()
   })
 
-  it('mounts the glass pane around the wrapper, tinted from the theme token', () => {
+  it('mounts one dock pane around the wrapper: hairline box, halo, 16px glass, theme tint', () => {
     renderWithProviders(<ChatInput value="" onChange={vi.fn()} onSend={vi.fn()} />)
     const wrapper = screen.getByTestId('input-wrapper')
-    // LiquidGlass renders [root > content div > children]; the root carries the
-    // corner radius and the tint layer sits among its effect layers.
-    const root = wrapper.parentElement?.parentElement as HTMLElement
+    const dock = dockOf(wrapper)
+    expect(dock).not.toBeNull()
+    expect(dock.className).toContain('border-[color:var(--glass-edge)]')
+    expect(dock.className).toContain('composer-halo')
+    expect(dock.style.borderRadius).toBe('17px')
+    // Glass renders [outer box > LiquidGlass root > content div > children]; the
+    // root carries the radius and the tint layer sits among its effect layers.
+    const root = dock.firstElementChild as HTMLElement
+    expect(root.classList.contains('liquid-glass')).toBe(true)
     expect(root.style.borderRadius).toBe('16px')
-    const layers = Array.from(root.querySelectorAll<HTMLElement>('div[aria-hidden="true"]'))
-    expect(layers.some(l => l.style.background.includes('var(--glass-tint)'))).toBe(true)
+    // The tint rides the oversized frost box inside the clipping effect layer.
+    const boxes = Array.from(root.querySelectorAll<HTMLElement>('div[aria-hidden="true"] > div'))
+    expect(boxes.some(l => l.style.background.includes('var(--glass-tint)'))).toBe(true)
   })
 
   it('defines --glass-tint and --glass-edge for both polarities', () => {
-    expect(INDEX_CSS).toMatch(/:root \{ --glass-tint: rgba\(30, 30, 34, 0\.55\); --glass-edge: rgba\(255, 255, 255, 0\.14\); \}/)
-    expect(INDEX_CSS).toMatch(/\[data-mode="light"\] \{ --glass-tint: rgba\(255, 255, 255, 0\.72\); --glass-edge: rgba\(0, 0, 0, 0\.10\); \}/)
+    expect(INDEX_CSS).toMatch(/:root \{ --glass-tint: rgba\(30, 30, 34, 0\.40\); --glass-edge: rgba\(255, 255, 255, 0\.14\); \}/)
+    expect(INDEX_CSS).toMatch(/\[data-mode="light"\] \{ --glass-tint: rgba\(238, 238, 243, 0\.45\); --glass-edge: rgba\(0, 0, 0, 0\.16\); \}/)
   })
 
-  // The pane must solidify wherever the app's other glass does: reduced
-  // transparency, increased contrast, and a Chromium built without
+  // Both forms of the material must solidify wherever the app's other glass
+  // does: reduced transparency, increased contrast, and a Chromium built without
   // backdrop-filter (#1817) — otherwise the transcript would show through the
-  // box the user is typing into.
-  it('solidifies under every glass fallback rule', () => {
-    renderWithProviders(<ChatInput value="" onChange={vi.fn()} onSend={vi.fn()} />)
-    const root = screen.getByTestId('input-wrapper').parentElement?.parentElement as HTMLElement
-    expect(root.classList.contains('liquid-glass')).toBe(true)
+  // box the user is typing into and through every chip above it.
+  it('solidifies the pane and the CSS panes under every glass fallback rule', () => {
     for (const block of [/@supports not \(\(backdrop-filter[\s\S]*?\n\}/, /@media \(prefers-reduced-transparency: reduce\)\{[\s\S]*?\n\}/, /@media \(prefers-contrast: more\)\{[\s\S]*?\n\}/]) {
       const rule = INDEX_CSS.match(block)?.[0] ?? ''
-      expect(rule, String(block)).toContain('.liquid-glass{ background:var(--bg-elevated) !important')
+      expect(rule, String(block)).toContain('.liquid-glass,.glass-pane{ background:var(--bg-elevated) !important')
       expect(rule, String(block)).toContain('.liquid-glass>[aria-hidden="true"]{ display:none !important }')
     }
   })

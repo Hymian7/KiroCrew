@@ -33,7 +33,7 @@ const fakeContext = {
 const MAP_URL = 'data:image/png;base64,map'
 
 /** The composer's settings — the pane has no defaults, every caller sets all three. */
-const composer = { cornerRadius: 16, frost: 24, lightIntensity: 24 }
+const composer = { cornerRadius: 16, frost: 12, lightIntensity: 24 }
 
 function measure(width: number, height: number) {
   act(() => {
@@ -44,6 +44,12 @@ function measure(width: number, height: number) {
 /** The effect layers under the root, in document order. */
 function layersOf(root: HTMLElement) {
   return Array.from(root.querySelectorAll<HTMLElement>(':scope > div[aria-hidden="true"]'))
+}
+
+/** The box that carries the frost: the tint layer clips an oversized child so
+ *  Chromium's under-blurred far edge lies outside the pane. */
+function frostBoxOf(layer: HTMLElement) {
+  return layer.firstElementChild as HTMLElement
 }
 
 beforeEach(() => {
@@ -75,8 +81,12 @@ describe('LiquidGlass', () => {
     expect(layers).toHaveLength(3)
     expect(layers[0].style.backdropFilter).toBe('')
     // The tint is the polarity-fixed token, not a per-caller colour.
-    expect(layers[1].style.background).toContain('var(--glass-tint)')
-    expect(layers[1].style.backdropFilter).toBe('blur(24px) saturate(1.55)')
+    const frost = frostBoxOf(layers[1])
+    expect(frost.style.background).toContain('var(--glass-tint)')
+    expect(frost.style.backdropFilter).toBe('blur(12px) saturate(1.55)')
+    // Two blur radii of overhang on every side, clipped by the layer.
+    expect(frost.style.inset).toBe('-24px')
+    expect(layers[1].style.overflow).toBe('hidden')
     // Every layer clips on the same circular radius as the root.
     for (const l of layers) expect(l.style.borderRadius).toBe('16px')
     expect(root.textContent).toBe('hi')
@@ -106,7 +116,7 @@ describe('LiquidGlass', () => {
     const layers = layersOf(root)
     expect(layers).toHaveLength(4)
     expect(layers[0].style.backdropFilter).toBe(`url(#${filter.id})`)
-    expect(layers[1].style.backdropFilter).toBe('blur(24px) saturate(1.55)')
+    expect(frostBoxOf(layers[1]).style.backdropFilter).toBe('blur(12px) saturate(1.55)')
     // The bevel is lit from straight above: no horizontal offset in either inset.
     expect(layers[2].style.boxShadow).toMatch(/^inset 0px 3\.27px/)
     // The map fed the canvas: a 512-capped raster of the host's aspect.

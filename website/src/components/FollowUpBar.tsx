@@ -173,10 +173,15 @@ function chipEntrance(index: number, animating: boolean): { className: string, s
 // first, so the pointer hand would survive the whole pending state.
 const CHIP_BASE = 'px-3 py-1.5 mc-message-font-chip text-left leading-snug transition-all border'
 
+// Every chip is its own Liquid Glass pill (`.glass-pane`, index.css): the same
+// tint, edge and top/bottom light as the composer, so the transcript blurs
+// through the chips the way it does through the box beneath them. A picked chip
+// mixes the accent INTO the glass (`glass-pane-accent`) instead of swapping to
+// an opaque wash, so it stays the same material.
 function chipColors(isPicked: boolean) {
   return isPicked
-    ? 'border-solid border-accent/50 text-accent bg-accent-subtle'
-    : 'border-border text-muted hover:text-text hover:border-accent/40 bg-bg-elevated'
+    ? 'glass-pane glass-pane-accent text-accent'
+    : 'glass-pane glass-pane-hover text-muted hover:text-text'
 }
 
 /** Standalone chip: the flex item itself, so it owns the width cap (and, in the
@@ -194,7 +199,12 @@ function chipClassName(isPicked: boolean, { shrink0 = false }: { shrink0?: boole
  *  future utility whose name merely contains `shrink-0`/`followup-chip`/`rounded-lg`
  *  cannot silently rewrite the wrong token and reintroduce the overlap. */
 function splitMainChipClassName(isPicked: boolean) {
-  return `flex-1 min-w-0 ${CHIP_BASE} rounded-l-lg ${chipColors(isPicked)}`
+  return `flex-1 min-w-0 ${CHIP_BASE} rounded-l-lg border-transparent bg-transparent ${isPicked ? 'text-accent' : 'text-muted hover:text-text'}`
+}
+
+/** The split-button wrapper is the glass pill; its two buttons sit on it. */
+function splitWrapperClassName(isPicked: boolean) {
+  return `rounded-lg transition-all ${chipColors(isPicked)}`
 }
 
 /**
@@ -309,10 +319,10 @@ function sendSegmentClassName(isPicked: boolean, pending: boolean) {
   // opens with `if (pending) return`, so a pointer hand here promises a click
   // that is already dropped. The hover accent below is still live while
   // pending — see the disposition on this span.
-  return `inline-flex items-center shrink-0 px-1.5 py-1.5 rounded-r-lg ${pending ? 'cursor-default' : 'cursor-pointer'} transition-all border border-l-0 ${
+  return `inline-flex items-center shrink-0 px-1.5 py-1.5 rounded-r-lg ${pending ? 'cursor-default' : 'cursor-pointer'} transition-all border border-transparent border-l-[color:var(--glass-edge)] bg-transparent ${
     isPicked
-      ? 'border-solid border-accent/50 text-accent bg-accent-subtle hover:bg-accent/20'
-      : 'border-border text-muted hover:text-accent hover:border-accent/40 bg-bg-elevated'
+      ? 'text-accent hover:bg-accent/20'
+      : 'text-muted hover:text-accent'
   }`
 }
 
@@ -494,7 +504,7 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
     // cannot resolve against an indefinite wrapper), leaving a wide empty gap
     // before the next chip. On the flex item the percentage resolves against
     // the strip's definite width.
-    <span className={`inline-flex items-stretch shrink-0 ${CHIP_MAX_WIDTH} ${entrance.className}${stateClass}`} style={entrance.style}>
+    <span className={`inline-flex items-stretch shrink-0 ${CHIP_MAX_WIDTH} ${splitWrapperClassName(isPicked)} ${entrance.className}${stateClass}`} style={entrance.style}>
       {mainChip}
       <button
         type="button"

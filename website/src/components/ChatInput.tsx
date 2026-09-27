@@ -148,7 +148,7 @@ import { fmtDateFields, fmtPercent } from '../i18n/format'
 import SessionRefStrip from './SessionRefStrip'
 import type { SessionRef } from '../utils/sessionRefs'
 import { activeElementIsEditable, isEditableTarget } from '../utils/editableTarget'
-import { LiquidGlass } from './ui/liquid-glass'
+import { Glass } from './Glass'
 const INPUT_MIN_H = 44
 const INPUT_DEFAULT_MAX_H = 140
 const INPUT_PREFILL_MAX_H = 320
@@ -3772,7 +3772,10 @@ function ChatInput({
        *  Approve all / Reject all plus a per-agent row (task + Approve/Reject)
        *  so one can run while another is rejected. "Review in panel" opens the
        *  Subagents tab. Not a single <button> wrapper — every control is its
-       *  own button. */}
+       *  own button. Plain glass, not the warn tint the tool-approval pane
+       *  below wears: when both are up, two warn panes in one band read as ONE
+       *  request (UX review of 76851c90 -- "I'd fear double-approving"), and
+       *  this card's Bot framing and pulse already say what it is. */}
       <AnimatePresence>
         {pendingSpawnApprovals.length > 0 && (
           <motion.div
@@ -3781,7 +3784,7 @@ function ChatInput({
             exit={{ opacity: 0, y: 8 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300, mass: 0.8 }}
           >
-            <div className="w-full bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] border border-border rounded-2xl mb-2 approval-glow">
+            <Glass variant="chip" radius={16} className="w-full mb-2 approval-glow">
               <div className="flex items-center gap-1.5 px-3.5 py-2.5 select-none flex-wrap">
                 <Bot size={13} className="text-warn shrink-0" />
                 <span className="text-[13px] font-body text-muted flex-1 min-w-0">
@@ -3859,7 +3862,7 @@ function ChatInput({
                   ))}
                 </div>
               )}
-            </div>
+            </Glass>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3873,6 +3876,17 @@ function ChatInput({
        *    outer  → mounts/unmounts the whole bar with the approval lifecycle
        *    inner  → toggles the ghost pill based on inline-pill viewport state
        */}
+      {/* The dock pane. ONE Liquid Glass surface (components/Glass.tsx) holds the
+          approval bar, the notices, the composer and the collapsed bar, so a bar
+          fused to the composer's top shares its pane instead of meeting it at a
+          seam; it is always mounted so an approval landing never remounts the
+          editor. It carries the composer halo at rest and the approval glow
+          while a decision is pending (both are box-shadows, so one at a time). */}
+      <Glass
+        radius={16}
+        data-testid="composer-dock"
+        className={hasApproval ? 'approval-glow' : `composer-halo${memoryMode === 'temporary' ? ' composer-halo-aim' : memoryMode === 'incognito' ? ' composer-halo-warn' : ''}`}
+      >
       <AnimatePresence>
         {pendingApproval && approvalId && (
           <motion.div
@@ -3881,7 +3895,7 @@ function ChatInput({
             exit={{ opacity: 0, y: 8 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300, mass: 0.8 }}
           >
-          <div className={`bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] border border-border ${showGhost ? 'rounded-2xl' : 'border-b-0 rounded-t-2xl'} approval-glow transition-[border-radius,border-color,border-width] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]`}>
+          <div className={`bg-[color-mix(in_srgb,var(--warn)_12%,transparent)] ${showGhost ? 'rounded-2xl' : 'rounded-t-2xl border-b border-[color:var(--glass-edge)]'} transition-[border-radius,border-color,border-width] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]`}>
               <AnimatePresence initial={false}>
                   {showGhost && (
                       <motion.div
@@ -4183,27 +4197,15 @@ function ChatInput({
         // at all times; the focus halo takes the same color there so the one
         // control lights up in one color instead of an accent ring around a
         // warn or aim edge.
-        className={hasApproval ? undefined : `composer-halo rounded-2xl${memoryMode === 'temporary' ? ' composer-halo-aim' : memoryMode === 'incognito' ? ' composer-halo-warn' : ''}`}
         style={{ overflow: 'hidden' }}
       >{/* File drag-and-drop target. Drag-drop is inherently pointer-only; the
            keyboard-accessible path is the "Attach files" button that opens the
            hidden file input above. Hence the scoped disable for the drop zone. */}
-      {/* Liquid Glass pane under the composer: --glass-tint over the blurred
-           transcript; the wrapper's own hairline border takes --glass-edge so the
-           pane keeps an outline on a white page, where a lit white rim vanishes. Always
-           mounted so an approval box arriving above never remounts the editor;
-           while one is attached the wrapper goes back to a solid surface and
-           square top, and the glass simply sits hidden behind it. */}
-      <LiquidGlass
-        cornerRadius={16}
-        frost={24}
-        lightIntensity={24}
-      >
       {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
       <div
         data-testid="input-wrapper"
         ref={wrapperRef}
-        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} ${hasApproval ? 'bg-bg-elevated' : 'bg-transparent'} ${memoryMode === 'temporary' ? 'border-aim' : memoryMode === 'incognito' ? 'border-warn' : hasApproval ? 'border-border focus-within:border-accent/50' : 'border-[color:var(--glass-edge)] focus-within:border-accent/50'}`}
+        className={`${hasApproval ? 'rounded-b-2xl rounded-t-none' : 'rounded-2xl'} relative transition-colors overflow-hidden ${manualHeight !== null ? 'flex flex-col min-h-0' : ''} ${(memoryMode === 'incognito' || memoryMode === 'temporary') ? 'border-2' : 'border'} bg-transparent ${memoryMode === 'temporary' ? 'border-aim' : memoryMode === 'incognito' ? 'border-warn' : 'border-transparent focus-within:border-accent/50'}`}
 
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
@@ -4959,7 +4961,7 @@ function ChatInput({
 
         {/* Mobile bottom sheet */}
 
-      </div></LiquidGlass></motion.div>)}
+      </div></motion.div>)}
       </AnimatePresence>
 
       {/* The way back. It stands exactly where the composer was and is the only
@@ -4989,7 +4991,7 @@ function ChatInput({
           aria-expanded={false}
           aria-label={i18nT('components.chatInput.expand_composer')}
           title={i18nT('components.chatInput.expand_composer')}
-          className="w-full flex items-center gap-2 px-3.5 py-2 rounded-2xl border border-border bg-bg-elevated text-muted hover:text-text transition-colors cursor-pointer text-left"
+          className="w-full flex items-center gap-2 px-3.5 py-2 rounded-2xl border-none bg-transparent text-muted hover:text-text transition-colors cursor-pointer text-left"
         >
           <ChevronsUpDown size={16} className="shrink-0" />
           {/* The verb is ALWAYS visible, and the draft joins it when there is one.
@@ -5016,6 +5018,7 @@ function ChatInput({
           )}
         </button>
       )}
+      </Glass>
 
       {/* Context shelf — plain full-width row below input.
           Stands down with the composer for the same reason it stands down for the

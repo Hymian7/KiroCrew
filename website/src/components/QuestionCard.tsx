@@ -199,7 +199,7 @@ function QuestionCard({ questions, onSubmit, onDismiss, busy = false, onDraftCha
        only once you can reach a chevron. The cap is viewport-relative so the
        composer and the conversation keep their share on a short window, with an
        absolute ceiling so a tall window does not stretch the card to fill it. */
-    <div className="border border-accent/30 rounded-xl bg-card shadow-md overflow-hidden animate-scale-in flex flex-col max-h-[min(60vh,32rem)]">
+    <div className="glass-pane glass-pane-accent composer-halo rounded-xl overflow-hidden animate-scale-in flex flex-col max-h-[min(60vh,32rem)]">
       {/* The scroller holds ONLY the questions; the action row below stays out of
           it so Submit / Dismiss are reachable without scrolling to the end. */}
       <div className="flex-1 min-h-0 overflow-y-auto">

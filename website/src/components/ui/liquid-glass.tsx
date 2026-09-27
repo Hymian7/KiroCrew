@@ -59,6 +59,10 @@ const SETTLE_MS = 120;
 const REFRACTION = 0.5;
 /** Thickness of the refracting edge band as a share of the maximum. */
 const DEPTH = 0.45;
+/** Peak white alpha of the top / bottom light bands, as a share of lightIntensity:
+ *  at the composer's light 24 the band tops out at ~22% white, bright enough to
+ *  read against the grey light tint and the smoked dark one. */
+const BAND_PEAK = 0.9;
 /** How far the bend spreads inward from the rim: flattens the profile's shoulder. */
 const SHOULDER = 1 - 0.62 * 0.18;
 /** Refractive index of the bevel. Roughly crown glass. */
@@ -184,13 +188,15 @@ function outlineMask(w: number, h: number, path: string, width: number, blur: nu
  * rather than a drawn border.
  */
 function specularRing(peak: number, radius: number): string {
-  // Even band along the top and bottom edges. On the sides it fades out just
-  // past the corner arc — measured in px from the corner radius, not as a share
-  // of the height — so a tall panel and a thin capsule wear the same rim.
+  // Even band along the top and bottom edges. On the sides it fades to CLEAR
+  // just past the corner arc — measured in px from the corner radius, not as a
+  // share of the height — so a tall panel and a thin capsule wear the same rim,
+  // and the side boundary is left to the wrapper's --glass-edge hairline alone
+  // (a line, not a glow: the reference material has no lit or shaded flanks).
   const a = (k: number) => `rgba(255,255,255,${Math.min(1, peak * k).toFixed(3)})`;
   const r1 = (radius * 0.7).toFixed(1);
   const r2 = (radius * 1.5).toFixed(1);
-  return `linear-gradient(to bottom, ${a(1)} 0px, ${a(0.35)} ${r1}px, ${a(0.06)} ${r2}px, ${a(0.06)} calc(100% - ${r2}px), ${a(0.35)} calc(100% - ${r1}px), ${a(1)} 100%)`;
+  return `linear-gradient(to bottom, ${a(1)} 0px, ${a(0.35)} ${r1}px, transparent ${r2}px, transparent calc(100% - ${r2}px), ${a(0.35)} calc(100% - ${r1}px), ${a(1)} 100%)`;
 }
 
 type Size = { width: number; height: number };
@@ -323,16 +329,24 @@ export function LiquidGlass({ children, cornerRadius, frost, lightIntensity }: L
         }}
       />
 
-      {/* frost + tint */}
-      <div
-        aria-hidden="true"
-        style={{
-          ...layer,
-          background: TINT,
-          backdropFilter: `blur(${frost}px) saturate(1.55)`,
-          WebkitBackdropFilter: `blur(${frost}px) saturate(1.55)`,
-        }}
-      />
+      {/* frost + tint. Chromium's backdrop blur under-blurs the last ~blur px
+          along the far (right and bottom) edges of the element that carries it:
+          over 8px stripes the bottom 17px of a 24px blur showed the stripes at a
+          third of their contrast while the top edge was flat, and a bare div did
+          the same, so it is the engine, not this composition. The blurring box
+          is therefore two blur radii larger than the pane on every side and the
+          pane clips it, so the under-blurred band lies outside what is shown. */}
+      <div aria-hidden="true" style={{ ...layer, overflow: "hidden" }}>
+        <div
+          style={{
+            position: "absolute",
+            inset: -frost * 2,
+            background: TINT,
+            backdropFilter: `blur(${frost}px) saturate(1.55)`,
+            WebkitBackdropFilter: `blur(${frost}px) saturate(1.55)`,
+          }}
+        />
+      </div>
 
       {/* bevel shading: light from straight above, so the top edge catches it and
           the bottom edge answers with the fainter far-side flare. */}
@@ -358,7 +372,7 @@ export function LiquidGlass({ children, cornerRadius, frost, lightIntensity }: L
           aria-hidden="true"
           style={{
             ...layer,
-            background: specularRing(0.24 * light, cornerRadius),
+            background: specularRing(BAND_PEAK * light, cornerRadius),
             maskImage: rim,
             WebkitMaskImage: rim,
             maskSize: "100% 100%",

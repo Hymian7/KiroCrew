@@ -2906,11 +2906,65 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
  * blurred backdrop of the composer and the mobile settings search capsule. Read
  * from data-mode polarity like the composer halo: light themes get a milky
  * white so the glass reads as a lit pane, dark themes a translucent near-black
- * so it reads as smoked glass — both keep --text legible on top. --glass-edge is
- * the hairline around the pane: a lit white rim is invisible on a white page, so
- * the edge is dark-on-light and light-on-dark instead. */
-:root { --glass-tint: rgba(30, 30, 34, 0.55); --glass-edge: rgba(255, 255, 255, 0.14); }
-[data-mode="light"] { --glass-tint: rgba(255, 255, 255, 0.72); --glass-edge: rgba(0, 0, 0, 0.10); }
+ * so it reads as smoked glass — both keep --text legible on top. The light tint
+ * is a cool light GREY, not white: on a white page a white fill leaves the top /
+ * bottom light bands nothing to stand out from, and the grey is what makes the
+ * pane read as glass rather than a lighter card. --glass-edge is the hairline
+ * around the pane: a lit white rim is invisible on a white page, so the edge is
+ * dark-on-light and light-on-dark instead; it is also the pane's ONLY side
+ * boundary — the light bands fade to clear past the corner arc (a line, not a
+ * glow). */
+:root { --glass-tint: rgba(30, 30, 34, 0.40); --glass-edge: rgba(255, 255, 255, 0.14); }
+[data-mode="light"] { --glass-tint: rgba(238, 238, 243, 0.45); --glass-edge: rgba(0, 0, 0, 0.16); }
+
+/* Glass pane, the CSS form of the Liquid Glass material for the SMALL surfaces
+ * in the composer dock: follow-up chips, the tip / suggestion / question cards,
+ * the queue, the memory chip, the jump-to-bottom button. Same tint, edge and
+ * top/bottom light as components/Glass.tsx; no refraction layer, because at
+ * chip size the edge bend measures as zero pixels of difference and the
+ * component's extra DOM would break the chip tree the tests and the entrance
+ * animation address. Rounding stays with the element. `-accent` / `-warn` mix a
+ * hue INTO the glass tint so a picked chip or a pending approval stays a glass. */
+.glass-pane {
+  background: var(--glass-tint);
+  backdrop-filter: blur(8px) saturate(1.55);
+  -webkit-backdrop-filter: blur(8px) saturate(1.55);
+  border: 1px solid var(--glass-edge);
+  /* The top/bottom light bands ride a custom property so a pane that ALSO
+     carries `.composer-halo` can add the halo to them: `box-shadow` is one
+     property, and two classes each setting it would leave whichever loses the
+     cascade with nothing (the halo beat the bands in dark, the light-mode bands
+     beat the halo in light). The combined rules below own that case. */
+  --glass-bands: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(255, 255, 255, 0.22);
+  box-shadow: var(--glass-bands);
+}
+[data-mode="light"] .glass-pane {
+  --glass-bands: inset 0 1px 0 rgba(255, 255, 255, 0.75), inset 0 -1px 0 rgba(255, 255, 255, 0.75);
+}
+/* Bands + halo on one element. Declared after `.composer-halo` would be
+   cleaner to read but `.glass-pane.composer-halo` (0,2,0) already outranks
+   both single-class rules, and the dark / focus forms below outrank the
+   polarity-scoped ones on specificity plus order. */
+.glass-pane.composer-halo { box-shadow: var(--glass-bands), 0 0 18px rgba(0, 0, 0, 0.06); }
+[data-mode="dark"] .glass-pane.composer-halo { box-shadow: var(--glass-bands), 0 0 18px rgba(0, 0, 0, 0.30); }
+.glass-pane.composer-halo:focus-within { box-shadow: var(--glass-bands), 0 0 18px var(--accent-glow); }
+[data-mode="dark"] .glass-pane.composer-halo:focus-within { box-shadow: var(--glass-bands), 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 18px var(--accent-glow); }
+.glass-pane-accent { background: color-mix(in srgb, var(--accent) 14%, var(--glass-tint)); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+/* `-warn` sets its edge here for the same reason `-accent` does: `.glass-pane`'s
+   `border` shorthand is declared after the utilities, so a `border-warn` on
+   the same element would lose to it on source order. */
+.glass-pane-warn { background: color-mix(in srgb, var(--warn) 12%, var(--glass-tint)); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+/* Interactive panes (chips) answer hover on the edge, as the old chip border did.
+   Declared here, after the utilities, because a Tailwind `hover:border-*` on the
+   same element loses to `.glass-pane`'s own border-color on source order. */
+.glass-pane-hover:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+/* The composer dock's two wrapper boxes (ChatPage.tsx) span the pane but hold
+   nothing of their own: every child is its own content column. The wrappers
+   pass input through and each child catches it, so the empty width beside the
+   column, and the scrollbar gutter, reach the transcript underneath. One rule
+   rather than a class per child, so a bar added to the dock later is covered. */
+.dock-inert{pointer-events:none}.dock-inert>*{pointer-events:auto}
 
 /* Composer halo (ChatInput.tsx): an offset-free shadow spreading evenly on all
  * four sides, so the box reads as set INTO the page rather than dropped onto it.
@@ -2934,6 +2988,14 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
 }
 .composer-halo:focus-within {
   box-shadow: 0 0 18px var(--accent-glow);
+}
+/* Dark themes add a 1px accent ring under the glow: on smoked glass the glow
+   alone did not separate a focused capsule from a resting one (a reader could
+   not tell the two apart), while on a light page the hairline turning accent
+   already reads. Same specificity as the dark rest rule, later in source, so
+   focus still wins; the memory-mode forms below come later again. */
+[data-mode="dark"] .composer-halo:focus-within {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 18px var(--accent-glow);
 }
 /* Memory-mode variants follow the wrapper's always-on border color (warn for
  * incognito, aim for temporary) so focus reads as one color per control. No
@@ -2995,7 +3057,7 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
   /* The Liquid Glass pane (components/ui/liquid-glass.tsx) solidifies to the
      elevated surface and drops its effect layers, so the composer and the
      Settings capsule keep an opaque, delimited box. */
-  .liquid-glass{ background:var(--bg-elevated) !important }
+  .liquid-glass,.glass-pane{ background:var(--bg-elevated) !important }
   .liquid-glass>[aria-hidden="true"]{ display:none !important }
   /* Floating notification cards (NotificationFeed mac variant) sit OVER page
      content, so they solidify to the card color, not the page background. */
@@ -3035,13 +3097,15 @@ body.mc-focus-mode.mc-focus-rail .focus-chrome-rail{
   *,*::before,*::after{ transition-duration:0s !important; scroll-behavior:auto !important }
 }
 @media (prefers-reduced-transparency: reduce){
-  .topbar-glass,.glass-surface{ backdrop-filter:none !important; -webkit-backdrop-filter:none !important; background:var(--bg) !important }
-  .liquid-glass{ background:var(--bg-elevated) !important }
+  .topbar-glass,.glass-surface,.glass-pane{ backdrop-filter:none !important; -webkit-backdrop-filter:none !important }
+  .topbar-glass,.glass-surface{ background:var(--bg) !important }
+  .liquid-glass,.glass-pane{ background:var(--bg-elevated) !important }
   .liquid-glass>[aria-hidden="true"]{ display:none !important }
 }
 @media (prefers-contrast: more){
   .glass-surface,.topbar-glass{ background:var(--bg) !important; border:1px solid var(--text) !important }
-  .liquid-glass{ background:var(--bg-elevated) !important }
+  .glass-pane{ border-color:var(--text) !important }
+  .liquid-glass,.glass-pane{ background:var(--bg-elevated) !important }
   /* On :root, not on .liquid-glass: the Settings capsule draws its hairline on
      the box AROUND the pane, so a pane-scoped override would miss it. */
   :root{ --glass-edge:var(--text) }

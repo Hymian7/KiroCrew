@@ -111,11 +111,10 @@ export function TipCard({ tip, onDismiss }: TipCardProps) {
   return (
     <motion.div
       data-testid="tip-card"
-      className="w-full flex items-start gap-2.5 px-4 py-2 rounded-md text-xs shadow-lg"
-      style={{
-        background: 'color-mix(in srgb, var(--accent) 6%, var(--bg-elevated))',
-        border: '1px solid color-mix(in srgb, var(--accent) 12%, transparent)',
-      }}
+      // Glass card (index.css `.glass-pane`): the accent is mixed into the glass
+      // tint, and the composer halo gives it the same offset-free depth as the
+      // composer it is attached to.
+      className="glass-pane glass-pane-accent composer-halo w-full flex items-start gap-2.5 px-4 py-2 rounded-md text-xs"
       initial={{ y: 6, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       exit={{ y: 4, opacity: 0 }}

@@ -46,14 +46,16 @@ describe('FollowUpBar', () => {
       render(<FollowUpBar options={['Picked', 'Unpicked']} picked={new Set(['Picked'])} onSelect={() => {}} />)
       const pickedBtn = screen.getByRole('button', { name: 'Picked' })
       const unpickedBtn = screen.getByRole('button', { name: 'Unpicked' })
-      expect(pickedBtn.className).toContain('border-accent')
+      // Glass pill: the accent is mixed INTO the material (`glass-pane-accent`,
+      // which also carries the accent edge) rather than an opaque wash.
+      expect(pickedBtn.className).toContain('glass-pane-accent')
       expect(pickedBtn.className).toContain('text-accent')
-      expect(pickedBtn.className).toContain('bg-accent-subtle')
       fireEvent.focus(pickedBtn)
       expect(screen.getByRole('tooltip').textContent).toMatch(/remove/i)
       fireEvent.blur(pickedBtn)
       expect(unpickedBtn.className).toContain('text-muted')
-      expect(unpickedBtn.className).toContain('bg-bg-elevated')
+      expect(unpickedBtn.className).toContain('glass-pane')
+      expect(unpickedBtn.className).not.toContain('glass-pane-accent')
       fireEvent.focus(unpickedBtn)
       expect(screen.getByRole('tooltip').textContent).toMatch(/add to input/i)
       fireEvent.blur(unpickedBtn)
@@ -68,7 +70,7 @@ describe('FollowUpBar', () => {
       fireEvent.click(btn)
       expect(btn.className).toContain('text-muted')
       rerender(<FollowUpBar options={['X']} picked={new Set(['X'])} onSelect={() => {}} />)
-      expect(screen.getByRole('button', { name: 'X' }).className).toContain('bg-accent-subtle')
+      expect(screen.getByRole('button', { name: 'X' }).className).toContain('glass-pane-accent')
     })
   })
 

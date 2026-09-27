@@ -102,11 +102,8 @@ export default function FolderSuggestionCard({
       // wrap to their own line instead of clipping. Content-driven on purpose:
       // the card tracks the composer's width, not the viewport's, so a media
       // query would misfire in narrow side-by-side panes.
-      className="w-full flex flex-wrap items-center gap-x-2.5 gap-y-1.5 px-4 py-2 rounded-md text-xs shadow-lg"
-      style={{
-        background: 'color-mix(in srgb, var(--accent) 6%, var(--bg-elevated))',
-        border: '1px solid color-mix(in srgb, var(--accent) 12%, transparent)',
-      }}
+      // Glass card, same material as TipCard (index.css `.glass-pane`).
+      className="glass-pane glass-pane-accent composer-halo w-full flex flex-wrap items-center gap-x-2.5 gap-y-1.5 px-4 py-2 rounded-md text-xs"
       initial={{ y: 6, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       exit={{ y: 4, opacity: 0 }}

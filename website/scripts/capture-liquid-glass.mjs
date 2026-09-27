@@ -89,6 +89,16 @@ const approvalDetail = {
     },
   ],
 }
+
+/** Last turn ends with an [OPTIONS:] line, so the follow-up chips render above the composer. */
+const OPTIONS = ['用 A', '用 B', '再调一下高光']
+const chipsDetail = {
+  ...detail,
+  messages: [
+    ...detail.messages.slice(0, -1),
+    { role: 'assistant', ts: Date.now() / 1000 - 30, content: `三个方案都渲染好了。\n\n[OPTIONS: ${OPTIONS.join(' | ')}]` },
+  ],
+}
 /** Incognito memory mode: the warn border stays, the surface is now the glass. */
 const incognitoSlots = slots.map(s => ({ ...s, memory_mode: 'incognito' }))
 
@@ -103,7 +113,7 @@ async function main() {
   }
 
   async function chat(theme, variant = '') {
-    activeDetail = variant === 'long' ? longDetail : variant === 'approval' ? approvalDetail : detail
+    activeDetail = variant === 'long' ? longDetail : variant === 'approval' ? approvalDetail : variant === 'chips' ? chipsDetail : detail
     const context = await browser.newContext({ viewport: { width: 1500, height: 950 }, deviceScaleFactor: 2 })
     const page = await context.newPage()
     logPageProblems(page)
@@ -119,13 +129,17 @@ async function main() {
     const dialogs = await page.getByRole('dialog').count()
     if (dialogs) throw new Error(`chat/${theme}: ${dialogs} unexpected dialog(s) open`)
     if (variant === 'approval' && !(await page.getByRole('button', { name: /allow once/i }).count())) throw new Error(`chat/${theme}/approval: approval bar missing`)
+    if (variant === 'chips') {
+      for (const o of OPTIONS) if (!(await page.getByRole('button', { name: o }).count())) throw new Error(`chat/${theme}/chips: chip "${o}" missing`)
+      console.log(`chat/${theme}/chips: ${await page.locator('.glass-pane').count()} glass pane(s) rendered`)
+    }
     if (variant === 'incognito') {
       const cls = await page.getByTestId('input-wrapper').first().getAttribute('class')
       if (!/border-warn/.test(cls ?? '')) throw new Error(`chat/${theme}/incognito: warn border missing`)
     }
     const box = await page.getByTestId('input-wrapper').first().boundingBox()
     if (!box) throw new Error(`chat/${theme}: input-wrapper missing`)
-    await assertGlass(page, page.getByTestId('input-wrapper').first().locator('xpath=../..'), `chat/${theme}`)
+    await assertGlass(page, page.getByTestId('composer-dock').first(), `chat/${theme}`)
     if (variant === 'long') {
       const under = await page.evaluate(b => Array.from(document.querySelectorAll('.msg-content p, .msg-content code, .msg-content li'))
         .filter(n => { const r = n.getBoundingClientRect(); return r.height > 0 && r.bottom > b.y && r.top < b.y + b.height && r.right > b.x && r.left < b.x + b.width }).length, box)
@@ -205,6 +219,7 @@ async function main() {
     await chat(theme, 'long')
     await chat(theme, 'approval')
     await chat(theme, 'incognito')
+    await chat(theme, 'chips')
     await settingsMobile(theme)
     await settingsDesktop(theme)
   }

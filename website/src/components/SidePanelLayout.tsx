@@ -12,7 +12,7 @@ import { useTerminalPoppedOut } from '../utils/terminalPopout'
 import { safeGetSessionItem, safeSetSessionItem } from '../utils/safeStorage'
 
 import { i18nT } from '../i18n/t'
-import { LiquidGlass } from './ui/liquid-glass'
+import { Glass } from './Glass'
 export interface SidePanelTab {
   key: string
   label: string
@@ -500,24 +500,15 @@ export default function SidePanelLayout({ title, tabs, defaultTab, rememberKey, 
               // occludes the visual viewport.
               style={keyboardInset > 0 ? { transform: `translateY(-${keyboardInset}px)` } : undefined}
             >
-              {/* Liquid Glass capsule: frosted --glass-tint over the list scrolling
-                * beneath, a --glass-edge hairline, and the composer's
-                * offset-free halo for depth. Focus is the hairline turning accent
-                * plus the halo's accent glow — the glow alone is too faint to read
-                * as a cue on a light page. */}
-              {/* The halo rides an outer box of the same radius: a shadow class on
-                * the ui/ primitive itself would be a restyle of the primitive. */}
-              <div className="pointer-events-auto mx-auto max-w-sm rounded-[25px] border border-[color:var(--glass-edge)] focus-within:border-accent composer-halo">
-              <LiquidGlass
-                cornerRadius={24}
-                frost={22}
-                lightIntensity={26}
-              >
+              {/* Liquid Glass capsule: the shared recipe (components/Glass.tsx) with the
+                * composer's halo for depth and its accent glow on focus-within. The
+                * capsule IS the focusable control, so its hairline turns accent too:
+                * the glow alone is too faint to read as a focus cue on a light page. */}
+              <Glass radius={24} className="composer-halo focus-within:border-accent pointer-events-auto mx-auto max-w-sm">
                 <SidePanelDockContext.Provider value="bottom-float">
                   {headerRight}
                 </SidePanelDockContext.Provider>
-              </LiquidGlass>
-              </div>
+              </Glass>
             </div>
           )}
         </div>
