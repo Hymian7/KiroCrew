@@ -43,7 +43,11 @@ from kiro_crew.constants import (
     strip_control_comments,
 )
 from kiro_crew.messaging.approval import APPROVAL_TIMEOUT_S, adoptable_reservation
-from kiro_crew.messaging.display_safety import redact_for_display
+from kiro_crew.messaging.display_safety import (
+    redact_for_display,
+    safe_split_offset,
+    severs_a_credential,
+)
 from kiro_crew.messaging.outbound_files import (
     ExtractLimits,
     OutboundFile,
@@ -693,6 +697,18 @@ def _shrunk_limit(current: int, rendered_cap: int, worst: int) -> int:
     scaled = int(current * (rendered_cap / worst) * 0.95)
     nxt = max(_MIN_SPLIT_LIMIT, min(scaled, current - _SHRINK_STEP))
     return nxt if nxt < current else _MIN_SPLIT_LIMIT
+
+
+def _delivered_form(source: str) -> str:
+    """What a seal actually SENDS for ``source``, as a credential scan must see it.
+
+    Mirrors ``_segment_text`` followed by ``_seal_current``'s own ``strip``. A cut is
+    graded before the seal runs, so grading the raw chunk grades text the reader
+    never gets: the facing edges of two chunks can be whitespace, a steering marker
+    or a horizontal rule, all of which disappear here -- and once they do, the two
+    messages sit flush against each other on screen.
+    """
+    return _strip_hr(_strip_steering(source)).strip()
 
 
 def _rendered_len(source: str) -> int:
@@ -1431,6 +1447,14 @@ class TelegramRenderer(Renderer):
                 if spans[0][0] == 0:
                     return  # the whole buffer is protected — do not rotate at all
                 held = raw[spans[0][0] :]
+                # No credential grade here, deliberately. ``held`` begins AT the ref
+                # span, so its first two characters are always ``![`` -- and ``!``
+                # survives canonicalising, standing between the sealed chunk's last
+                # character and anything the tail could contribute. Measured over
+                # alt-text, link-target, trailing-text and bare-adjacency shapes: no
+                # join reaches a credential pattern, so a gate here would be a gate
+                # on an unreachable boundary. The chunks among themselves are graded
+                # by the splitter, which redacts before choosing any boundary.
                 for chunk in await asyncio.to_thread(
                     _split_markdown_bounded, raw[: spans[0][0]], rendered_cap
                 ):
@@ -1482,6 +1506,46 @@ class TelegramRenderer(Renderer):
             tail = chunks[-1].rstrip()
             if tail.endswith("```"):
                 chunks[-1] = tail[:-3].rstrip("\n")
+        # The chunks are sealed as separate messages and each is redacted on its own,
+        # so a key the cut severed matches nothing in any one of them while the
+        # reader's client renders the markup away and reads them as one key down the
+        # screen. Grade the DELIVERED form, which the seal strips.
+        if await asyncio.to_thread(severs_a_credential, chunks, _default_redactor, _delivered_form):
+            # Cut where the reader cannot rejoin rather than where the budget lands.
+            # Both sides are SOURCE slices: splitter output does not concatenate back
+            # to its input (fences are closed and reopened), so rejoining chunks
+            # would hand the user text the model never wrote.
+            #
+            # The offset is bounded by the SOURCE budget, and escaping inflates, so a
+            # safe head can still render past the HTML cap. Shrink the budget by the
+            # inflation actually observed and look again, which is the same loop the
+            # splitter itself runs -- a safe cut that fits is worth more than giving
+            # up on the rotation, since a deferral holds the whole buffer.
+            # The search grades the DELIVERED form of both sides, so the offset it
+            # returns is one this caller can take. Grading raw here and re-checking
+            # afterwards would deadlock the segment: the search is deterministic, so a
+            # rejected answer is the same answer every rotation and nothing ever goes
+            # out. Off the loop for the cost reason the redaction above carries -- each
+            # sampled offset is two full-buffer redaction passes.
+            budget, head, offset = limit, "", 0
+            while True:
+                offset = await asyncio.to_thread(
+                    safe_split_offset, raw, budget, _default_redactor, _delivered_form
+                )
+                head = raw[:offset]
+                worst = await asyncio.to_thread(_rendered_len, head)
+                if not offset or worst <= rendered_cap:
+                    break
+                if budget <= _MIN_SPLIT_LIMIT:
+                    offset = 0
+                    break
+                budget = _shrunk_limit(budget, rendered_cap, worst)
+            if not offset:
+                # Deliver NOTHING: the withheld text rides the next rotation, and the
+                # final seal re-splits and seals an over-cap segment chunk by chunk.
+                self._buf = [raw + protocol_suffix]
+                return
+            chunks = [head, raw[offset:]]
         for ch in chunks[:-1]:
             self._buf = [ch]
             # A length rotation never extracts: only a SEMANTIC seal (steer

@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 
 import kiro_crew.discord.transport_dispatch as td_mod
-from conftest import assert_rejected_without_backtracking
+from conftest import CREDENTIAL_STRADDLE_SHAPES, assert_rejected_without_backtracking
 from kiro_crew import session_directive
 from kiro_crew.acp.types import (
     EVENT_COMPACTION_STATUS,
@@ -57,7 +57,9 @@ from kiro_crew.discord.commands import (
 from kiro_crew.discord.renderer import (
     DiscordApprovalDecider,
     DiscordRenderer,
+    _delivered_form,
     _extract_options,
+    _redact_all,
     _strip_steering,
     build_option_components,
     session_provenance_tag,
@@ -77,6 +79,7 @@ from kiro_crew.discord.transport_dispatch import (
 )
 from kiro_crew.messaging import driver as messaging_driver
 from kiro_crew.messaging.attachments import cleanup
+from kiro_crew.messaging.display_safety import canonicalize_display
 from kiro_crew.messaging.link import (
     UNBIND_REASON_UNSPECIFIED,
     ChannelLink,
@@ -6079,3 +6082,194 @@ class TestRedactionNotice:
         assert any("[REDACTED: credential]" in t for t, _c in cli.sent) or any(
             "[REDACTED: credential]" in t for _i, t, _c in cli.edits
         )
+
+
+class TestRotationSeamCredentialSafety:
+    """A rotation must not hand the reader a key by putting two frames in a row.
+
+    The length cut lands on the RAW buffer and every frame is redacted ALONE, so a
+    credential the model wrote with markup across the cut matches nothing in either
+    frame -- and the reader's client renders the markup away and reads the halves
+    as one key, one message under the other.
+
+    Every shape here is asserted on the SCREEN: the frames the fake client actually
+    received, read the two ways a reader can produce (canonicalise the copied join,
+    and canonicalise each frame then read them in order). That is the same pair
+    ``joins_to_a_credential`` grades, but stated over the whole delivered sequence
+    and using only the redactor and the canonicaliser, so it holds whatever the
+    renderer did to get there.
+    """
+
+    def _renderer(
+        self, monkeypatch: pytest.MonkeyPatch, limit: int
+    ) -> tuple[DiscordRenderer, FakeClient]:
+        cli = FakeClient()
+        r = DiscordRenderer(cli, "chan1", DISCORD_CAPABILITIES, session_key="sk")  # type: ignore[arg-type]
+        monkeypatch.setattr(r, "_limit", lambda: limit)
+        monkeypatch.setattr("kiro_crew.discord.renderer._EDIT_THROTTLE_S", 1e9)
+        return r, cli
+
+    #: A cut inside an unbroken run of non-space characters is a HARD cut at the
+    #: budget, which is what puts the boundary inside the credential rather than at
+    #: some paragraph break the splitter would have preferred.
+    _LIMIT = 200
+
+    def _straddling_source(self, head: str, tail: str) -> str:
+        """One long word whose character at offset ``_LIMIT`` splits *head*/*tail*."""
+        return "a" * (self._LIMIT - len(head)) + head + tail + "b" * self._LIMIT
+
+    async def _screen(self, monkeypatch: pytest.MonkeyPatch, src: str) -> list[str]:
+        """Every frame the reader ends up with, rotation then final seal."""
+        r, cli = self._renderer(monkeypatch, self._LIMIT)
+        r._buf = [src]
+        await r._rotate_on_length()
+        await r._seal_current(extract_uploads=False)
+        return [text for text, _ in cli.sent]
+
+    @pytest.mark.asyncio
+    async def test_a_cut_after_trailing_space_is_graded_on_the_trimmed_form(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Discord shows the reader the trimmed text, so the grade must trim too.
+
+        This shape is MEASURED, not assumed. At this limit the splitter's own chunks
+        already sever, so the rotation does consult the offset search; the offset a
+        non-trimming transform returns leaves halves whose RAW forms are safe -- the
+        spaces sit between them -- while their DELIVERED forms sit flush and read as one
+        key. The assertion is therefore on the delivered forms: comparing the raw frames
+        is what makes this hazard invisible.
+        """
+        head, tail = "AKIAIOSF", "ODNN7EXAMPLE"
+        prefix = "word " * 20
+        src = prefix + head + "   " + tail + " trailing prose here"
+        r, cli = self._renderer(monkeypatch, len(prefix + head) + 3)
+        r._buf = [src]
+
+        await r._rotate_on_length()
+        await r._seal_current(extract_uploads=False)
+
+        frames = [text for text, _ in cli.sent]
+        assert len(frames) >= 2, f"fixture delivered {len(frames)} frame(s), so it grades no seam"
+        self._assert_no_key_on_screen([_delivered_form(f) for f in frames])
+
+    @staticmethod
+    def _assert_no_key_on_screen(frames: list[str]) -> None:
+        for reading in (
+            canonicalize_display("".join(frames)),
+            "".join(canonicalize_display(f) for f in frames),
+        ):
+            assert _redact_all(reading) == reading, f"key readable across frames: {frames}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("head", "tail"), CREDENTIAL_STRADDLE_SHAPES)
+    async def test_a_straddled_credential_never_reaches_two_frames(
+        self, monkeypatch: pytest.MonkeyPatch, head: str, tail: str
+    ) -> None:
+        rejoined = (
+            canonicalize_display(head + tail),
+            canonicalize_display(head) + canonicalize_display(tail),
+        )
+        assert any(_redact_all(r) != r for r in rejoined), "fixture is not a straddle"
+
+        frames = await self._screen(monkeypatch, self._straddling_source(head, tail))
+        assert frames, "nothing was delivered at all"
+        self._assert_no_key_on_screen(frames)
+
+    @pytest.mark.asyncio
+    async def test_an_innocent_body_still_rotates(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Control: the grading refuses boundaries, it does not stop rotating."""
+        r, cli = self._renderer(monkeypatch, self._LIMIT)
+        r._buf = ["word " * 200]
+        await r._rotate_on_length()
+        assert cli.sent, "an innocent body was withheld"
+
+    @pytest.mark.asyncio
+    async def test_no_safe_offset_withholds_the_text_instead_of_sending_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The failure direction: nothing safe to cut means nothing goes out.
+
+        With no sampled offset safe, the rotation must not fall back on the cut it
+        already refused. It delivers NOTHING, keeps the buffer whole, and the final
+        seal then redacts that buffer as one string -- where the key is intact and
+        matches, so it is replaced rather than shown.
+        """
+        head, tail = "AKIAIOSF", "ODNN7EXAMPLE"
+        src = self._straddling_source(head, tail)
+        monkeypatch.setattr("kiro_crew.discord.renderer.safe_split_offset", lambda *a, **k: 0)
+        r, cli = self._renderer(monkeypatch, self._LIMIT)
+        r._buf = [src]
+
+        await r._rotate_on_length()
+
+        assert cli.sent == [], "text went out on a cut the grading had refused"
+        assert "".join(r._buf) == src, "the withheld text was not kept whole"
+
+        await r._seal_current(extract_uploads=False)
+        delivered = "".join(text for text, _ in cli.sent)
+        assert head + tail not in delivered, "the final seal shipped the key"
+
+    @pytest.mark.asyncio
+    async def test_a_markup_span_covering_a_whole_piece_is_caught(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Piece length is no defence: canonicalising DROPS a link's target.
+
+        Three pieces, where no neighbouring PAIR reveals anything -- the link needs
+        its closing bracket, which is in the third piece -- while the full join
+        collapses the url to its label and puts that label against ``AKIA``. So the
+        middle piece is swallowed whole, which a pairwise grade cannot see.
+        """
+        key_head, key_tail = "AKIA", "IOSFODNN7EXAMPLE"
+        src = (
+            "a" * (self._LIMIT - len(key_head))
+            + key_head
+            + "["
+            + key_tail
+            + "](http://q/"
+            + "b" * self._LIMIT
+            + ") rest"
+        )
+        frames = await self._screen(monkeypatch, src)
+        assert frames, "nothing was delivered at all"
+        self._assert_no_key_on_screen(frames)
+
+    @pytest.mark.asyncio
+    async def test_a_retained_buffer_holds_only_source_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Whatever is kept live must be a SLICE of the source, never rejoined chunks.
+
+        ``split_markdown_safe`` does not concatenate back to its input: a chunk is
+        rstripped and a fence is closed at the seal and reopened after it. Rejoining
+        chunks would glue one paragraph's last word onto the next, or invent a fence
+        run the model never wrote, and that is the text the user is eventually sent.
+        """
+        src = (
+            "a" * (self._LIMIT - 8)
+            + "AKIAIOSF"
+            + "ODNN7EXAMPLE"
+            + "\n\npara two\n\n```py\nx = 1\n```\n\npara three "
+            + "c" * self._LIMIT
+        )
+        r, _cli = self._renderer(monkeypatch, self._LIMIT)
+        r._buf = [src]
+        await r._rotate_on_length()
+        retained = "".join(r._buf)
+        assert retained in src, "retained buffer is not a slice of the source"
+
+    @pytest.mark.asyncio
+    async def test_a_boundary_is_graded_on_the_text_the_seal_delivers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A steering marker between the halves vanishes at the seal.
+
+        The grade must run on the delivered form. Graded raw, the marker separates
+        the halves and no credential pattern matches; delivered, the seal removes it
+        and the two messages sit flush together.
+        """
+        r, cli = self._renderer(monkeypatch, self._LIMIT)
+        r._buf = ["a" * (self._LIMIT - 8) + "AKIAIOSF" + "ODNN7EXAMPLE" + "b" * self._LIMIT]
+        await r._rotate_on_length()
+        await r._seal_current(extract_uploads=False)
+        self._assert_no_key_on_screen([text for text, _ in cli.sent])

@@ -68,7 +68,11 @@ from kiro_crew.discord.client import (
     DISCORD_MAX_TOTAL_UPLOAD_BYTES,
 )
 from kiro_crew.messaging.approval import APPROVAL_TIMEOUT_S
-from kiro_crew.messaging.display_safety import redact_for_display
+from kiro_crew.messaging.display_safety import (
+    redact_for_display,
+    safe_split_offset,
+    severs_a_credential,
+)
 from kiro_crew.messaging.outbound_files import (
     ExtractLimits,
     OutboundFile,
@@ -222,6 +226,20 @@ def _strip_steering(text: str) -> str:
     cleaned = re.sub(r"\[STEERING\b[^\]\r\n]*$", "", cleaned)  # unclosed, streaming
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
+
+
+def _delivered_form(source: str) -> str:
+    """*source* as the reader will actually see it, for grading a cut.
+
+    ``safe_split_offset`` grades both sides of a candidate boundary through this,
+    and its contract names surrounding whitespace as one of the things a renderer
+    removes on the way out. Trimming matters more than it looks: a cut placed just
+    after a trailing space leaves each raw half safe while the delivered halves sit
+    flush together, and Discord shows the reader the trimmed form. Modelling MORE
+    trimming than a path happens to perform only makes the grade stricter, which is
+    the safe direction; modelling less is what lets a boundary through.
+    """
+    return _strip_steering(source).strip()
 
 
 def _transform_buries_refs(canonical: str, presented: str) -> bool:
@@ -943,6 +961,21 @@ class DiscordRenderer(Renderer):
                 if await asyncio.to_thread(protected_ref_spans, candidate):
                     return
             chunks = await asyncio.to_thread(split_markdown_safe, candidate, limit)
+            # Card text is model text, and this branch cuts it on the same length
+            # budget, so its boundaries carry the same hazard as the source path's.
+            # A presentation snapshot reaches the reader without protocol handling,
+            # but the splitter still rstrips each chunk and the sink trims what it
+            # sends, so the boundary is graded through the same delivered form the
+            # source path uses. Modelling trimming a path may not perform only makes
+            # the grade stricter, and ONE rule across the sites is what stops the
+            # next one being added with a weaker transform.
+            if await asyncio.to_thread(severs_a_credential, chunks, _redact_all, _delivered_form):
+                offset = await asyncio.to_thread(
+                    safe_split_offset, candidate, limit, _redact_all, _delivered_form
+                )
+                if not offset:
+                    return
+                chunks = [candidate[:offset], candidate[offset:]]
             for chunk in chunks[:-1]:
                 self._buf = []
                 self._delivery_text = chunk
@@ -1015,6 +1048,39 @@ class DiscordRenderer(Renderer):
                             degraded = True
             if degraded:
                 self._segment_uploads_safe = False
+        # The splitter cuts the RAW buffer on a length budget and each chunk is
+        # redacted alone, so a key written with markup through the cut matches
+        # nothing in any one chunk while the reader's client renders the markup away
+        # and reads them as one key down the screen. The retained tail is graded with
+        # the sealed chunks because the splitter never sees the pair: ``tail`` is the
+        # remainder this rotation keeps, not one of the chunks it produced. Grade
+        # what would actually be DELIVERED, through the SAME transform the offset
+        # search below uses -- this gate decides whether that search runs at all, so
+        # a gate reading a weaker form than the search hides exactly the boundaries
+        # the search exists to move. Trimming can only reveal more severs, never
+        # fewer.
+        if await asyncio.to_thread(
+            severs_a_credential, [*sealed, tail], _redact_all, _delivered_form
+        ):
+            # Cut where the reader cannot rejoin rather than where the budget lands.
+            # The head and the retained remainder are SOURCE slices: splitter output
+            # does not concatenate back to its input (a chunk is rstripped, a fence
+            # is closed and reopened), so rejoining chunks would hand the user text
+            # the model never wrote. The search grades the DELIVERED form, so its
+            # answer is one this caller can take -- grading raw and re-checking after
+            # would deadlock the segment, since a deterministic search returns the
+            # same rejected answer every rotation.
+            offset = await asyncio.to_thread(
+                safe_split_offset, split_source, limit, _redact_all, _delivered_form
+            )
+            if not offset:
+                # Deliver NOTHING: withheld text rides the next rotation, and the
+                # final seal redacts the whole segment as one string.
+                self._buf = [raw + protocol_suffix]
+                self._delivery_text = None
+                return
+            sealed = [split_source[:offset]]
+            tail = split_source[offset:] + raw[len(split_source) :]
         for ch in sealed:
             self._buf = [ch]
             self._delivery_text = None

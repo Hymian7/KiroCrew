@@ -23,7 +23,7 @@ keeps its own (possibly session-scoped) redactor.
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Callable, Sequence
 
 from kiro_crew.preview_text import drop_format_chars
 
@@ -169,16 +169,104 @@ def joins_to_a_credential(head: str, tail: str, redactor: Callable[[str], str]) 
     return any(redactor(reading) != reading for reading in readings)
 
 
-def safe_split_offset(text: str, limit: int, redactor: Callable[[str], str]) -> int:
+def severs_a_credential(
+    pieces: Sequence[str],
+    redactor: Callable[[str], str],
+    present: Callable[[str], str] | None = None,
+) -> bool:
+    """Would a reader shown *pieces* in order see a key that none of them holds?
+
+    The n-piece case of :func:`joins_to_a_credential`. A renderer whose cap forces
+    one buffer into several messages redacts each message ALONE, so a credential the
+    split severed matches nothing in any single message -- and the reader's client
+    renders the markup away and reads the pieces one under the other, in order, as
+    one text.
+
+    Two readings, because neither subsumes the other:
+
+    * **the whole sequence**, every piece redacted alone and then put together. This
+      is what catches a key whose MARKUP spans an entire piece rather than whose
+      characters do: cut ``AKIA[KEYTAIL](http://host/<long>)`` into three and no
+      neighbouring pair canonicalises to anything (the link needs its closing
+      bracket, which is in the third piece), while the full join collapses the url
+      to the label and puts the label against ``AKIA``. Piece length is no defence
+      here -- canonicalising DROPS a link's target, so a piece of any size can
+      vanish entirely.
+    * **each boundary against everything after it**, which is the reading that
+      survives a pattern needing a trailing boundary: the reader sees a message
+      break where the whole-sequence join sees the next character, so a key
+      completed at the end of one piece must be caught even when later text would
+      spoil the match.
+
+    Every piece is put through the same redaction the sender will apply and then
+    reduced to what the platform SHOWS, exactly as :func:`joins_to_a_credential`
+    does for a single cut. Soundness rests on the same property:
+    ``redact_for_display`` is already a fixed point for one string, so whatever
+    either reading finds is produced by putting pieces together and by nothing else.
+    One piece therefore answers False: there is no boundary.
+
+    *present* maps a piece to the form the platform will actually DELIVER, and when
+    it is given BOTH forms are graded -- a sever in either answers True. Both,
+    because neither form dominates the other and a caller that picked one would miss
+    the half the other sees:
+
+    * trimming REVEALS a join. ``AKIAIOSF\\n\\n`` and ``   ODNN7EXAMPLE`` are kept
+      apart by whitespace no credential pattern tolerates, and sit flush on screen
+      once the sink strips it.
+    * trimming CONCEALS one. ``-----BEGIN `` and ``RSA PRIVATE KEY-----`` need that
+      trailing space to match, so the trimmed pair reads clean while the delivered
+      pair -- on a sink that does not trim, or trims less than modelled -- is an
+      intact PEM anchor.
+
+    So "model more trimming and the grade only gets stricter" is FALSE, and grading
+    the delivered form alone is not the safe direction. Grading both is.
+
+    True means the split is unusable and the caller must cut somewhere else (see
+    :func:`safe_split_offset`) or deliver nothing at all.
+    """
+    forms = [list(pieces)]
+    if present is not None:
+        forms.append([present(piece) for piece in pieces])
+    return any(_sequence_severs(form, redactor) for form in forms)
+
+
+def _sequence_severs(pieces: Sequence[str], redactor: Callable[[str], str]) -> bool:
+    """One reading pass over *pieces* as given. See :func:`severs_a_credential`."""
+    safe = [redact_for_display(piece, redactor)[0] for piece in pieces]
+    readings = [
+        canonicalize_display("".join(safe)),
+        "".join(canonicalize_display(piece) for piece in safe),
+    ]
+    for index in range(len(safe) - 1):
+        rest = "".join(safe[index + 1 :])
+        readings.append(canonicalize_display(safe[index] + rest))
+        readings.append(canonicalize_display(safe[index]) + canonicalize_display(rest))
+    return any(redactor(reading) != reading for reading in readings)
+
+
+def safe_split_offset(
+    text: str,
+    limit: int,
+    redactor: Callable[[str], str],
+    present: Callable[[str], str] | None = None,
+) -> int:
     """The largest SAMPLED offset at or below *limit* that severs no credential.
+
+    *present* maps a side to the form the platform will actually DELIVER, and an
+    offset is accepted only when NEITHER the raw pair nor the presented pair severs.
+    Both, for the reason :func:`severs_a_credential` sets out: trimming reveals a
+    join where whitespace kept the edges apart, and conceals one where the pattern
+    needs that whitespace to match, so neither form dominates. It has to be the
+    caller's own, because only the caller knows what its sink strips. Default is
+    identity, for a caller that delivers its text verbatim.
 
     Not the largest safe offset: the candidates are sampled, so a safe offset
     between two samples is passed over. Those characters are not lost, only
     deferred to the next delivery.
 
     Used by a renderer whose message cap forces *text* into two deliveries: cut
-    here and :func:`joins_to_a_credential` is false, so the reader cannot rejoin a
-    key across the boundary.
+    here and :func:`joins_to_a_credential` is false of both forms, so the reader
+    cannot rejoin a key across the boundary.
 
     Candidates step back EXPONENTIALLY (``limit``, then 1, 2, 4, 8 ... characters
     before it), for a cost bound: the nearest safe boundary is not needed, only a
@@ -201,7 +289,7 @@ def safe_split_offset(text: str, limit: int, redactor: Callable[[str], str]) -> 
         return len(text)
     offset, step = limit, 0
     while offset > 0:
-        if not joins_to_a_credential(text[:offset], text[offset:], redactor):
+        if not severs_a_credential([text[:offset], text[offset:]], redactor, present):
             return offset
         step = 1 if step == 0 else step * 2
         offset = limit - step
