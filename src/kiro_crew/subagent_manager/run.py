@@ -424,14 +424,16 @@ class RunEventCoordinator(ManagerComponent):
                     fallback_ran = True
                     targets, missing = kill_set(handles, popped, seen=seen)
                     kill_failed = join_failures(
-                        await self._manager._sigkill_sessions(session_key, targets), missing
+                        await self._manager._sigkill_sessions(session_key, targets, popped=popped),
+                        missing,
                     )
                 except Exception:
                     logger.exception("Subagent %s: reset failed, force-killing", info.id)
                     fallback_ran = True
                     targets, missing = kill_set(handles, popped, seen=seen)
                     kill_failed = join_failures(
-                        await self._manager._sigkill_sessions(session_key, targets), missing
+                        await self._manager._sigkill_sessions(session_key, targets, popped=popped),
+                        missing,
                     )
                 else:
                     # A completed reset (True, or False for a key the reaper had
@@ -447,7 +449,9 @@ class RunEventCoordinator(ManagerComponent):
                             "Subagent %s: process survived the reset, force-killing", info.id
                         )
                         fallback_ran = True
-                        kill_failed = await self._manager._sigkill_sessions(session_key, survivors)
+                        kill_failed = await self._manager._sigkill_sessions(
+                            session_key, survivors, popped=popped
+                        )
                     if missing:
                         fallback_ran = True
                         kill_failed = join_failures(kill_failed, missing)

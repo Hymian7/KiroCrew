@@ -4306,11 +4306,23 @@ class SubagentManager:
     ) -> None:
         return await self._terminal._reap_once_impl(agent_id, info, elapsed, reason=reason)
 
-    async def _sigkill_session(self, session_key: str, handle: ProcessHandle | None) -> str | None:
-        return await self._terminal._sigkill_session_impl(session_key, handle)
+    async def _sigkill_session(
+        self,
+        session_key: str,
+        handle: ProcessHandle | None,
+        *,
+        popped: "list[tuple[Any, ProcessHandle]] | None" = None,
+    ) -> str | None:
+        return await self._terminal._sigkill_session_impl(session_key, handle, popped=popped)
 
-    async def _sigkill_sessions(self, session_key: str, handles: list[ProcessHandle]) -> str | None:
-        return await self._terminal._sigkill_sessions_impl(session_key, handles)
+    async def _sigkill_sessions(
+        self,
+        session_key: str,
+        handles: list[ProcessHandle],
+        *,
+        popped: "list[tuple[Any, ProcessHandle]] | None" = None,
+    ) -> str | None:
+        return await self._terminal._sigkill_sessions_impl(session_key, handles, popped=popped)
 
     def _sessions_under(self, session_key: str) -> list[tuple[Any, ProcessHandle]]:
         return self._terminal._sessions_under_impl(session_key)

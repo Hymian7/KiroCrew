@@ -423,6 +423,18 @@ class OrphanStallMonitor(ManagerComponent):
             orphans = list_orphans()
             if not orphans:
                 return
+            # Imported HERE, not at this module's top, and structurally required
+            # rather than a style choice: ``bind_component_globals`` rebuilds every
+            # ``*_impl`` with ``subagent``'s module dict as its ``__globals__``
+            # (``subagent_manager/_component.py``), whose own docstring states the
+            # consequence -- "an import at the top of its defining module is inert
+            # for it. Every global it loads must resolve in ``namespace`` -- add the
+            # name there, or import it inside the function." A top-level import here
+            # would raise NameError at the first call. ABSOLUTE, because the rebound
+            # function's package is ``kiro_crew`` -- a relative import resolves
+            # against that and walks off the top of the package.
+            from kiro_crew.runtime_ownership import authorize_runtime_kill
+
             logger.info("Reconciling %d orphaned subagent(s)", len(orphans))
             processed = 0
             # DM-fallback messages are DIGESTED: collected across the whole
@@ -444,9 +456,28 @@ class OrphanStallMonitor(ManagerComponent):
                         # started (folder creation time) to avoid false negatives under load
                         pid_recorded_at = state.get("pid_recorded_at", state.get("started", 0))
                         if self._manager._is_orphan_process(pid, pid_recorded_at):
+                            # ``state.json`` is a record this run wrote before the
+                            # restart, and it says nothing about who is using the
+                            # process NOW. A shared runtime carries the parent and
+                            # every sibling sub-agent on one pid, so a per-run file
+                            # naming it is not authority to end it: the lease table
+                            # is, and it is the only thing that can see the tenants
+                            # this file never knew about.
+                            #
+                            # A refused kill still tombstones below. That is the
+                            # point: this run is over either way, and the tombstone
+                            # is what tells the user so. What the refusal prevents
+                            # is ending a process the tombstone has no claim on.
+                            authorized = authorize_runtime_kill(
+                                pid,
+                                reason=f"orphaned subagent {agent_id} from a prior gateway run",
+                                caller="subagent_manager.reconcile_orphans",
+                            )
                             # Awaited: the Windows arm is a taskkill spawn that
                             # waits on the target, kept off the loop.
-                            kill_failed = await self._manager._kill_orphan_pid(pid)
+                            kill_failed = (
+                                await self._manager._kill_orphan_pid(pid) if authorized else None
+                            )
                             try:
                                 sel().log_tool_invocation(
                                     session_key=f"subagent:{agent_id}",
@@ -455,8 +486,15 @@ class OrphanStallMonitor(ManagerComponent):
                                     # Never ``killed`` for a process the kill
                                     # left standing: the folder is reconciled
                                     # below either way, so this row is the only
-                                    # place the process's fate is recorded.
-                                    outcome="killed" if kill_failed is None else "failed",
+                                    # place the process's fate is recorded. A
+                                    # refusal and a failed signal are separate
+                                    # outcomes because only one of them means
+                                    # something tried and could not.
+                                    outcome=(
+                                        "refused"
+                                        if not authorized
+                                        else ("killed" if kill_failed is None else "failed")
+                                    ),
                                     error=kill_failed or "",
                                     metadata={"subagent_id": agent_id, "pid": pid},
                                 )

@@ -731,7 +731,10 @@ class TestSubagentReaper:
 
         assert info.done is True
         # No session was live before the reset, so the kill is handed no handle.
-        mock_kill.assert_awaited_once_with("subagent:hang0001", None)
+        # ``popped`` is the session the reset actually popped, forwarded so the kill
+        # can release that session's own lease even when the reset was cancelled
+        # before ``provider.shutdown()`` and the torn-down table has unwound.
+        mock_kill.assert_awaited_once_with("subagent:hang0001", None, popped=[])
 
     @pytest.mark.asyncio
     async def test_run_finally_timeout_on_reset(self) -> None:

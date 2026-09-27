@@ -74,7 +74,9 @@ def _kill_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(platform_compat, "IS_WINDOWS", False)
     for name in _KILL_PRIMITIVES:
-        guard = _refuse_unpinned_signal_async if name.endswith("_async") else _refuse_unpinned_signal
+        guard = (
+            _refuse_unpinned_signal_async if name.endswith("_async") else _refuse_unpinned_signal
+        )
         monkeypatch.setattr(platform_compat, name, guard)
 
 
@@ -158,8 +160,9 @@ class TestCronReaper:
 
         svc._claims["ok1"] = _RunClaim(trigger="scheduled", claimed_at=time.time() - 60)  # 60s old
 
-        with patch("kiro_crew.sel.sel"), patch(
-            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._reaper_loop()
@@ -180,8 +183,9 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - _JOB_TIMEOUT_SECS - 60, task=done_task
         )
 
-        with patch("kiro_crew.sel.sel"), patch(
-            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._reaper_loop()
@@ -209,15 +213,21 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - _JOB_TIMEOUT_SECS - 60, task=_live_task()
         )
 
-        with patch("kiro_crew.sel.sel"), patch(
-            "kiro_crew.cron._REAPER_RESET_TIMEOUT", 0.05
-        ), patch.object(
-            svc, "_sigkill_session", new_callable=lambda: AsyncMock(return_value=None)
-        ) as mock_kill, patch.object(svc, "_save"):
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch("kiro_crew.cron._REAPER_RESET_TIMEOUT", 0.05),
+            patch.object(
+                svc, "_sigkill_session", new_callable=lambda: AsyncMock(return_value=None)
+            ) as mock_kill,
+            patch.object(svc, "_save"),
+        ):
             await svc._force_reap("hang1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
         assert job.last_status == "error"
-        mock_kill.assert_awaited_once_with("cron:hang1", None, who="Reaper")
+        # ``popped`` is the session the reset actually popped, forwarded so the kill
+        # can release that session's own lease even when the reset was cancelled
+        # before ``provider.shutdown()`` and the torn-down table has unwound.
+        mock_kill.assert_awaited_once_with("cron:hang1", None, who="Reaper", popped=[])
 
     @pytest.mark.asyncio
     async def test_reaper_sigkill_on_reset_exception(self, tmp_path: object) -> None:
@@ -235,13 +245,20 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - _JOB_TIMEOUT_SECS - 10, task=_live_task()
         )
 
-        with patch("kiro_crew.sel.sel"), patch.object(
-            svc, "_sigkill_session", new_callable=lambda: AsyncMock(return_value=None)
-        ) as mock_kill, patch.object(svc, "_save"):
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch.object(
+                svc, "_sigkill_session", new_callable=lambda: AsyncMock(return_value=None)
+            ) as mock_kill,
+            patch.object(svc, "_save"),
+        ):
             await svc._force_reap("exc1", _JOB_TIMEOUT_SECS + 10, claim=claim)
 
         assert job.last_status == "error"
-        mock_kill.assert_awaited_once_with("cron:exc1", None, who="Reaper")
+        # ``popped`` is the session the reset actually popped, forwarded so the kill
+        # can release that session's own lease even when the reset was cancelled
+        # before ``provider.shutdown()`` and the torn-down table has unwound.
+        mock_kill.assert_awaited_once_with("cron:exc1", None, who="Reaper", popped=[])
 
     @pytest.mark.asyncio
     async def test_reaper_cancels_asyncio_task(self, tmp_path: object) -> None:
@@ -292,9 +309,10 @@ class TestCronReaper:
         claim = svc._claim_run("reaped1", "scheduled")
         svc._reaped_jobs.mark("reaped1", claim)
 
-        with patch.object(svc, "_execute_with_timeout", new_callable=AsyncMock), patch.object(
-            svc, "_merge_job_result"
-        ) as mock_merge:
+        with (
+            patch.object(svc, "_execute_with_timeout", new_callable=AsyncMock),
+            patch.object(svc, "_merge_job_result") as mock_merge,
+        ):
             await svc._run_job_isolated(job, claim)
 
         mock_merge.assert_not_called()
@@ -311,9 +329,10 @@ class TestCronReaper:
         claim = svc._claim_run("reaped2", "scheduled")
         svc._reaped_jobs.mark("reaped2", claim)
 
-        with patch.object(
-            svc, "_execute_with_timeout", side_effect=asyncio.CancelledError
-        ), patch.object(svc, "_merge_job_result") as mock_merge:
+        with (
+            patch.object(svc, "_execute_with_timeout", side_effect=asyncio.CancelledError),
+            patch.object(svc, "_merge_job_result") as mock_merge,
+        ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._run_job_isolated(job, claim)
 
@@ -328,9 +347,10 @@ class TestCronReaper:
 
         job = _make_job("normal1")
 
-        with patch.object(svc, "_execute_with_timeout", new_callable=AsyncMock), patch.object(
-            svc, "_merge_job_result"
-        ) as mock_merge:
+        with (
+            patch.object(svc, "_execute_with_timeout", new_callable=AsyncMock),
+            patch.object(svc, "_merge_job_result") as mock_merge,
+        ):
             await svc._run_job_isolated(job, svc._claim_run("normal1", "scheduled"))
 
         mock_merge.assert_called_once()
@@ -399,8 +419,9 @@ class TestCronReaper:
         async def capture_start(j: CronJob, claim: object = None) -> None:
             start_captured.append(svc.running_since("track1") is not None)
 
-        with patch.object(svc, "_execute_with_timeout", side_effect=capture_start), patch.object(
-            svc, "_merge_job_result"
+        with (
+            patch.object(svc, "_execute_with_timeout", side_effect=capture_start),
+            patch.object(svc, "_merge_job_result"),
         ):
             await svc._run_job_isolated(job, svc._claim_run("track1", "scheduled"))
 
@@ -417,10 +438,9 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - _JOB_TIMEOUT_SECS - 60, task=_live_task()
         )
 
-        with patch.object(
-            svc, "_force_reap", new_callable=AsyncMock
-        ) as mock_reap, patch(
-            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        with (
+            patch.object(svc, "_force_reap", new_callable=AsyncMock) as mock_reap,
+            patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._reaper_loop()
@@ -482,8 +502,10 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - 5500, task=_live_task()
         )
 
-        with patch("kiro_crew.sel.sel"), patch.object(svc, "_save"), patch(
-            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch.object(svc, "_save"),
+            patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._reaper_loop()
@@ -526,8 +548,10 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - 86500, task=_live_task()
         )
 
-        with patch("kiro_crew.sel.sel"), patch.object(svc, "_save"), patch(
-            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch.object(svc, "_save"),
+            patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._reaper_loop()
@@ -548,8 +572,10 @@ class TestCronReaper:
             trigger="scheduled", claimed_at=time.time() - _JOB_TIMEOUT_SECS - 60, task=_live_task()
         )
 
-        with patch("kiro_crew.sel.sel"), patch.object(svc, "_save"), patch(
-            "asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])
+        with (
+            patch("kiro_crew.sel.sel"),
+            patch.object(svc, "_save"),
+            patch("asyncio.sleep", AsyncMock(side_effect=[None, asyncio.CancelledError])),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await svc._reaper_loop()
@@ -1033,7 +1059,9 @@ class TestReaperRecordsAFailedSigkill:
 
         svc, job, claim = _overdue_reap_fixture(tmp_path, "bounded1")
         _session_with_pid(svc, "cron:bounded1", 4343)
-        blob = "\n".join(f"ERROR: The process with PID {4343 + n} could not be terminated." for n in range(200))
+        blob = "\n".join(
+            f"ERROR: The process with PID {4343 + n} could not be terminated." for n in range(200)
+        )
         assert len(blob) > MAX_ERROR_DETAIL_LEN
         children, start_id, sweep = _kill_path_stubs()
 
@@ -1047,15 +1075,18 @@ class TestReaperRecordsAFailedSigkill:
                 "kiro_crew.platform_compat.kill_process_group",
                 side_effect=PermissionError(blob),
             ),
-            patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(side_effect=PermissionError(blob))),
+            patch(
+                "kiro_crew.platform_compat.kill_pid_async",
+                AsyncMock(side_effect=PermissionError(blob)),
+            ),
         ):
             await svc._force_reap("bounded1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
         assert _audited_outcome(mock_sel) == "failed"
         last_error = job.last_error or ""
-        assert len(last_error) <= MAX_ERROR_DETAIL_LEN, (
-            f"last_error is {len(last_error)} chars: the kill failure was appended unbounded"
-        )
+        assert (
+            len(last_error) <= MAX_ERROR_DETAIL_LEN
+        ), f"last_error is {len(last_error)} chars: the kill failure was appended unbounded"
         assert last_error.startswith("Reaped after")
         assert "; kill failed: PermissionError: ERROR: The process with PID 4343" in last_error
         runs, _ = await svc._history.get_job_history("bounded1")
@@ -1064,7 +1095,9 @@ class TestReaperRecordsAFailedSigkill:
         bounded = with_kill_failure("x" * MAX_ERROR_DETAIL_LEN, blob)
         assert len(bounded) == MAX_ERROR_DETAIL_LEN
         assert bounded.endswith(blob[:KILL_FAILURE_RESERVE_LEN])
-        assert bounded.startswith("x" * (MAX_ERROR_DETAIL_LEN - KILL_FAILURE_RESERVE_LEN - len("; kill failed: ")))
+        assert bounded.startswith(
+            "x" * (MAX_ERROR_DETAIL_LEN - KILL_FAILURE_RESERVE_LEN - len("; kill failed: "))
+        )
         assert with_kill_failure("", "gone") == "kill failed: gone"
 
     @pytest.mark.asyncio
@@ -1133,9 +1166,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("killed1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -1222,7 +1253,10 @@ class TestReaperRecordsAFailedSigkill:
             ),
             patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)),
         ):
-            assert await svc._sigkill_session("cron:fallback", _handle_of(svc, "cron:fallback")) is None
+            assert (
+                await svc._sigkill_session("cron:fallback", _handle_of(svc, "cron:fallback"))
+                is None
+            )
 
     @pytest.mark.asyncio
     async def test_on_windows_a_drain_that_raises_is_a_failure_and_no_root_only_fallback_stands_in(
@@ -1248,9 +1282,13 @@ class TestReaperRecordsAFailedSigkill:
                 side_effect=PermissionError("Access is denied."),
             ),
             patch("kiro_crew.platform_compat.kill_process_tree_async", AsyncMock()) as tree_kill,
-            patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)) as pid_kill,
+            patch(
+                "kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)
+            ) as pid_kill,
         ):
-            failure = await svc._sigkill_session("cron:win-fallback", _handle_of(svc, "cron:win-fallback"))
+            failure = await svc._sigkill_session(
+                "cron:win-fallback", _handle_of(svc, "cron:win-fallback")
+            )
 
         assert failure == (
             "Windows tree cleanup incomplete for pid 4949: PermissionError: Access is denied."
@@ -1287,9 +1325,14 @@ class TestReaperRecordsAFailedSigkill:
             patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)),
             patch("kiro_crew.platform_compat.pgroup_exists", return_value=True) as group,
             patch("kiro_crew.platform_compat.windows_tree_cleanup_pending", return_value=False),
-            patch("kiro_crew.platform_compat.kill_process_tree_pinned", return_value=False) as drain,
+            patch(
+                "kiro_crew.platform_compat.kill_process_tree_pinned", return_value=False
+            ) as drain,
         ):
-            assert await svc._sigkill_session("cron:win-gone", _handle_of(svc, "cron:win-gone")) is None
+            assert (
+                await svc._sigkill_session("cron:win-gone", _handle_of(svc, "cron:win-gone"))
+                is None
+            )
 
         drain.assert_called_once_with(5050, _START_ID, platform_compat.SIGKILL)
         tree_kill.assert_not_awaited()
@@ -1338,9 +1381,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             handle = _handle_of(svc, "cron:succ")
             # The reset popped the run's session; a successor process now holds the key.
@@ -1377,9 +1418,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("popped1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -1405,9 +1444,7 @@ class TestReaperRecordsAFailedSigkill:
             patch("kiro_crew.acp.client._kill_escaped_children"),
             patch("kiro_crew.platform_compat.get_process_start_id", return_value=_START_ID),
             _isolated_leader(),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             assert await svc._sigkill_session("cron:root", _handle_of(svc, "cron:root")) is None
 
@@ -1430,7 +1467,10 @@ class TestReaperRecordsAFailedSigkill:
             _group_gone(),
             patch("kiro_crew.platform_compat.kill_process_tree_async", AsyncMock()) as tree_kill,
         ):
-            assert await svc._sigkill_session("cron:recycled", _handle_of(svc, "cron:recycled")) is None
+            assert (
+                await svc._sigkill_session("cron:recycled", _handle_of(svc, "cron:recycled"))
+                is None
+            )
 
         tree_kill.assert_not_awaited()
         # Never read through a pid that is not ours: no fresh child probe, and
@@ -1456,11 +1496,15 @@ class TestReaperRecordsAFailedSigkill:
         ):
             unread = await svc._sigkill_session("cron:unread", _handle_of(svc, "cron:unread"))
             with patch("kiro_crew.platform_compat.get_process_start_id", return_value=_START_ID):
-                no_record = await svc._sigkill_session("cron:norecord", _handle_of(svc, "cron:norecord"))
+                no_record = await svc._sigkill_session(
+                    "cron:norecord", _handle_of(svc, "cron:norecord")
+                )
 
         tree_kill.assert_not_awaited()
         assert unread == "pid 5454 is alive but could not be verified as this run's; not signalled"
-        assert no_record == "pid 5555 is alive but could not be verified as this run's; not signalled"
+        assert (
+            no_record == "pid 5555 is alive but could not be verified as this run's; not signalled"
+        )
 
     @pytest.mark.asyncio
     async def test_a_pid_that_has_exited_is_nothing_to_kill(self) -> None:
@@ -1508,7 +1552,9 @@ class TestReaperRecordsAFailedSigkill:
 
         with (
             patch("kiro_crew.acp.client._get_child_pids", return_value=[7272]) as probe,
-            patch("kiro_crew.acp.client._capture_child_records", return_value={7272: ("333", b"sh")}),
+            patch(
+                "kiro_crew.acp.client._capture_child_records", return_value={7272: ("333", b"sh")}
+            ),
             patch("kiro_crew.acp.client._kill_escaped_children") as sweep,
             # The root's two reads, then the post-sweep read of the recorded
             # child: gone (its start id does not read back).
@@ -1521,7 +1567,9 @@ class TestReaperRecordsAFailedSigkill:
         ):
             failure = await svc._sigkill_session("cron:walk", handle)
 
-        probe.assert_called_once_with(5757)  # the walk was entered; the second read stopped the signal
+        probe.assert_called_once_with(
+            5757
+        )  # the walk was entered; the second read stopped the signal
         tree_kill.assert_not_awaited()
         sweep.assert_called_once_with({6262: ("222", b"node")})
         assert failure is not None and "7272" in failure, (
@@ -1589,9 +1637,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("unmapped1", elapsed=_JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -1628,9 +1674,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("torn1", elapsed=_JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -1666,9 +1710,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("torn3", elapsed=_JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -1731,7 +1773,9 @@ class TestReaperRecordsAFailedSigkill:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -1773,9 +1817,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
             # The run's own teardown (``SessionLifecycle.reset``), resumed by the
             # reap's cancel, signals the pid it holds through its own seams.
             patch(
@@ -1852,7 +1894,9 @@ class TestReaperRecordsAFailedSigkill:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -1901,10 +1945,10 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
             patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
-            patch("kiro_crew.platform_compat.kill_process_tree_async", AsyncMock(return_value=True)),
+                "kiro_crew.platform_compat.kill_process_tree_async", AsyncMock(return_value=True)
+            ),
             patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)),
         ):
             # The run's own finally reset pops its session and hangs; then a late
@@ -1964,9 +2008,7 @@ class TestReaperRecordsAFailedSigkill:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("survived1", elapsed=_JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -2120,7 +2162,9 @@ def _start_id_reads(table: dict[int, Any]) -> Any:
     A list is consumed in order and its last value then repeats; anything else
     is that pid's constant answer; an unlisted pid reads ``None`` (gone).
     """
-    state = {pid: (list(value) if isinstance(value, list) else value) for pid, value in table.items()}
+    state = {
+        pid: (list(value) if isinstance(value, list) else value) for pid, value in table.items()
+    }
 
     def _read(pid: int) -> str | None:
         value = state.get(pid)
@@ -2281,7 +2325,11 @@ class TestALeaderlessGroupIsNeverReaped:
             patch("kiro_crew.acp.client._kill_escaped_children"),
             # Unreadable at snapshot time: no verified group id on the handle. By
             # the kill the leader has exited.
-            patch("os.getpgid", side_effect=ProcessLookupError("[Errno 3] No such process"), create=True),
+            patch(
+                "os.getpgid",
+                side_effect=ProcessLookupError("[Errno 3] No such process"),
+                create=True,
+            ),
             patch("kiro_crew.platform_compat.get_process_start_id", return_value=None),
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
             patch("kiro_crew.platform_compat.pgroup_exists", return_value=True),
@@ -2460,7 +2508,9 @@ class TestARecordedChildTheSweepLeftStandingIsNamed:
     """
 
     @staticmethod
-    def _fixture(tmp_path: object, job_id: str, pid: int, child: int) -> tuple[CronService, CronJob, _RunClaim]:
+    def _fixture(
+        tmp_path: object, job_id: str, pid: int, child: int
+    ) -> tuple[CronService, CronJob, _RunClaim]:
         svc, job, claim = _overdue_reap_fixture(tmp_path, job_id)
         client = _session_with_pid(svc, f"cron:{job_id}", pid)
         _vouching_child(client, child)
@@ -2496,9 +2546,7 @@ class TestARecordedChildTheSweepLeftStandingIsNamed:
             patch("kiro_crew.platform_compat.pid_is_zombie", return_value=False),
             _group_gone(),
             patch("kiro_crew.process_identity._SWEEP_SETTLE_SECS", 0, create=True),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
             patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock()) as pid_kill,
         ):
             await svc._force_reap("execd1", _JOB_TIMEOUT_SECS + 60, claim=claim)
@@ -2699,9 +2747,7 @@ class TestEveryProcessUnderTheKeyIsAnswered:
             patch("kiro_crew.platform_compat.pid_exists", return_value=True),
             _isolated_leader(),
             _group_gone(),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("recycled-both", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -2727,15 +2773,14 @@ class TestEveryProcessUnderTheKeyIsAnswered:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("both1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
-        assert [called.args[0] for called in group_kill.call_args_list] == [8080, 9080], (
-            "the run's own (torn-down) process must be killed, and the successor beside it"
-        )
+        assert [called.args[0] for called in group_kill.call_args_list] == [
+            8080,
+            9080,
+        ], "the run's own (torn-down) process must be killed, and the successor beside it"
         assert _audited_outcome(mock_sel) == "reaped"
 
     @pytest.mark.asyncio
@@ -2804,7 +2849,9 @@ class TestTheSessionTheResetPopsIsCaptured:
     ) -> None:
         svc, job, claim = _overdue_reap_fixture(tmp_path, "late1")
         assert svc._session_process_handles("cron:late1") == [], "the snapshot must see nothing"
-        svc._sessions.reset = AsyncMock(side_effect=self._registering_reset(svc, "cron:late1", 8787))
+        svc._sessions.reset = AsyncMock(
+            side_effect=self._registering_reset(svc, "cron:late1", 8787)
+        )
         children, start_id, sweep = _kill_path_stubs()
 
         with (
@@ -2813,9 +2860,7 @@ class TestTheSessionTheResetPopsIsCaptured:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("late1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -2829,7 +2874,9 @@ class TestTheSessionTheResetPopsIsCaptured:
     ) -> None:
         """The cold start had not spawned yet: nothing names its process, so nothing can verify it."""
         svc, job, claim = _overdue_reap_fixture(tmp_path, "late2")
-        svc._sessions.reset = AsyncMock(side_effect=self._registering_reset(svc, "cron:late2", None))
+        svc._sessions.reset = AsyncMock(
+            side_effect=self._registering_reset(svc, "cron:late2", None)
+        )
 
         with (
             patch("kiro_crew.sel.sel") as mock_sel,
@@ -2847,12 +2894,16 @@ class TestTheSessionTheResetPopsIsCaptured:
         ) in (job.last_error or "")
 
     @pytest.mark.asyncio
-    async def test_the_popped_handle_joins_the_snapshot_not_replaces_it(self, tmp_path: object) -> None:
+    async def test_the_popped_handle_joins_the_snapshot_not_replaces_it(
+        self, tmp_path: object
+    ) -> None:
         """A torn-down run process seen at the snapshot is still killed beside the popped successor."""
         svc, job, claim = _overdue_reap_fixture(tmp_path, "late3")
         _session_with_pid(svc, "cron:late3", 8888)
         _torn_down_by_the_run(svc, "cron:late3")
-        svc._sessions.reset = AsyncMock(side_effect=self._registering_reset(svc, "cron:late3", 9888))
+        svc._sessions.reset = AsyncMock(
+            side_effect=self._registering_reset(svc, "cron:late3", 9888)
+        )
         children, start_id, sweep = _kill_path_stubs()
 
         with (
@@ -2861,9 +2912,7 @@ class TestTheSessionTheResetPopsIsCaptured:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("late3", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -2883,9 +2932,9 @@ class TestTheSessionTheResetPopsIsCaptured:
             "the popped session under the recycled pid was dropped as a duplicate of the "
             "snapshot handle"
         )
-        assert snapshot == same and hash(snapshot) == hash(same), (
-            "the handle's identity is (pid, start id); group id and child records are not part of it"
-        )
+        assert snapshot == same and hash(snapshot) == hash(
+            same
+        ), "the handle's identity is (pid, start id); group id and child records are not part of it"
         assert snapshot != recycled
 
     @pytest.mark.asyncio
@@ -2905,7 +2954,9 @@ class TestTheSessionTheResetPopsIsCaptured:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -2950,9 +3001,7 @@ class TestTheSessionTheResetPopsIsCaptured:
             start_id,
             sweep,
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             assert svc._session_process_handles("cron:late4") == []
             await svc._force_reap("late4", _JOB_TIMEOUT_SECS + 60, claim=claim)
@@ -3028,9 +3077,7 @@ class TestARegistrationAfterThePopIsNamedNotChased:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("chase1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -3048,7 +3095,9 @@ class TestARegistrationAfterThePopIsNamedNotChased:
         assert 9797 in {s.provider._client._pid for s in svc._sessions._sessions.values()}
 
     @pytest.mark.asyncio
-    async def test_a_session_the_pass_already_answered_is_not_reported(self, tmp_path: object) -> None:
+    async def test_a_session_the_pass_already_answered_is_not_reported(
+        self, tmp_path: object
+    ) -> None:
         """The run's own torn-down session still sits in the table after the pass: handled, so one reset and no failure."""
         svc, job, claim = _overdue_reap_fixture(tmp_path, "chase3")
         _session_with_pid(svc, "cron:chase3", 8888)
@@ -3062,9 +3111,7 @@ class TestARegistrationAfterThePopIsNamedNotChased:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("chase3", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -3088,7 +3135,9 @@ class TestARegistrationAfterThePopIsNamedNotChased:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -3147,9 +3196,7 @@ class TestARegistrationAfterThePopIsNamedNotChased:
             sweep,
             # The first process is gone once its reset completed: no survivor.
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("chase4", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -3228,9 +3275,7 @@ class TestEveryKeyOfTheRunIsEnded:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("seq1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -3269,22 +3314,20 @@ class TestEveryKeyOfTheRunIsEnded:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("older1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
         assert [called.args[0] for called in group_kill.call_args_list] == [7011]
         svc._sessions.reset.assert_awaited_once()
         assert svc._sessions.reset.await_args.args[0] == "cron:older1:current"
-        assert "cron:older1:finished" in svc._sessions._sessions, (
-            "the reap of the current run ended the finished run's session"
-        )
+        assert (
+            "cron:older1:finished" in svc._sessions._sessions
+        ), "the reap of the current run ended the finished run's session"
         assert _audited_outcome(mock_sel) == "reaped"
-        assert svc.active_session_keys() == frozenset({"cron:older1:finished"}), (
-            "the key the reap answered was not retired, or the finished run's key was"
-        )
+        assert svc.active_session_keys() == frozenset(
+            {"cron:older1:finished"}
+        ), "the key the reap answered was not retired, or the finished run's key was"
 
     @pytest.mark.asyncio
     async def test_a_key_the_run_registers_while_its_others_are_ended_is_ended_by_a_second_round(
@@ -3306,15 +3349,14 @@ class TestEveryKeyOfTheRunIsEnded:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("late1", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
-        assert [called.args[0] for called in group_kill.call_args_list] == [7020, 7021], (
-            "the key the run registered while its first key was being ended was not ended"
-        )
+        assert [called.args[0] for called in group_kill.call_args_list] == [
+            7020,
+            7021,
+        ], "the key the run registered while its first key was being ended was not ended"
         assert _audited_outcome(mock_sel) == "reaped"
         audit = mock_sel().log_tool_invocation.call_args.kwargs
         assert audit["metadata"]["session_keys"] == ["cron:late1:agentA", "cron:late1:agentB"]
@@ -3341,9 +3383,7 @@ class TestEveryKeyOfTheRunIsEnded:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("late2", _JOB_TIMEOUT_SECS + 60, claim=claim)
 
@@ -3356,9 +3396,9 @@ class TestEveryKeyOfTheRunIsEnded:
             "not reset, not signalled"
         ) in (job.last_error or "")
         assert "cron:late2:agentC" in svc._sessions._sessions
-        assert svc.active_session_keys() == frozenset({"cron:late2:agentC"}), (
-            "a key the reap did not end must stay registered as live"
-        )
+        assert svc.active_session_keys() == frozenset(
+            {"cron:late2:agentC"}
+        ), "a key the reap did not end must stay registered as live"
 
     @pytest.mark.asyncio
     async def test_the_run_s_keys_are_ended_together_not_one_after_another(
@@ -3402,9 +3442,7 @@ class TestEveryKeyOfTheRunIsEnded:
             children,
             start_id,
             sweep,
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             try:
                 await asyncio.wait_for(
@@ -3528,7 +3566,9 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         gate = asyncio.Event()
         started: list[Any] = []
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.memory_mode = "persistent"
             provider.is_process_alive = lambda: True
@@ -3570,9 +3610,7 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
             start_id,
             sweep,
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             assert svc._session_process_handles("cron:fence1") == []
             await svc._force_reap("fence1", _JOB_TIMEOUT_SECS + 60, claim=claim)
@@ -3621,7 +3659,9 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         gate = asyncio.Event()
         started: list[Any] = []
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.memory_mode = "persistent"
             provider.is_process_alive = lambda: True
@@ -3677,9 +3717,7 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
             start_id,
             sweep,
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("fence7", _JOB_TIMEOUT_SECS + 60, claim=claim)
             assert refused_during_passes == [True], (
@@ -3723,7 +3761,9 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -3795,9 +3835,7 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
             start_id,
             sweep,
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             mock_sel().log_tool_invocation.side_effect = lambda **_: events.append("audit")
             await svc._force_reap("fence5", _JOB_TIMEOUT_SECS + 60, claim=claim)
@@ -3831,7 +3869,9 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -3856,7 +3896,9 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         for _ in range(20):
             await asyncio.sleep(0)
         assert not waiter.done(), "the claim did not wait on the busy parent's turn"
-        assert mgr._has_allocation_reservation("cron:fence6"), "the waiting claim holds a reservation"
+        assert mgr._has_allocation_reservation(
+            "cron:fence6"
+        ), "the waiting claim holds a reservation"
         assert not mgr._spawn_in_flight("cron:fence6"), "a claim waiting on the turn is not a start"
 
         svc = CronService(base_dir=None, on_job=AsyncMock())
@@ -3877,9 +3919,7 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
             start_id,
             sweep,
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             await svc._force_reap("fence6", _JOB_TIMEOUT_SECS + 60, claim=claim)
             assert _audited_outcome(mock_sel) == "reaped", (
@@ -3926,7 +3966,8 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         svc._sessions.ending_key = _fence
         svc._sessions.reset = AsyncMock(side_effect=_reset)
         svc._sessions._spawn_in_flight = MagicMock(
-            side_effect=lambda key: events.append(f"spawn in flight? {key}") or "refused at registration, its provider hard-killed there"
+            side_effect=lambda key: events.append(f"spawn in flight? {key}")
+            or "refused at registration, its provider hard-killed there"
         )
         job = _make_job("fence2")
         svc._jobs = [job]
@@ -4003,7 +4044,9 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
         from kiro_crew.config import KiroCrewConfig
         from kiro_crew.session import SessionManager
 
-        def _factory(session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any) -> Any:
+        def _factory(
+            session_key: Any = None, agent: Any = None, channel_id: Any = None, **_: Any
+        ) -> Any:
             provider = AsyncMock()
             provider.start = AsyncMock()
             provider.memory_mode = "persistent"
@@ -4064,9 +4107,7 @@ class TestAColdStartInFlightWhenTheRunEndsIsFenced:
             start_id,
             sweep,
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
         ):
             mock_sel().log_tool_invocation.side_effect = lambda **_: events.append("audit")
             await svc._force_reap("fence7", _JOB_TIMEOUT_SECS + 60, claim=claim)
@@ -4198,7 +4239,9 @@ class TestAGoneWindowsRootDrainsItsPendingTreeCleanup:
         with (
             patch("kiro_crew.platform_compat.get_process_start_id", return_value=None),
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch("kiro_crew.platform_compat.windows_tree_cleanup_pending", return_value=True) as pin,
+            patch(
+                "kiro_crew.platform_compat.windows_tree_cleanup_pending", return_value=True
+            ) as pin,
             patch("kiro_crew.platform_compat.kill_process_tree_pinned") as drain,
             patch("kiro_crew.acp.client._kill_escaped_children"),
         ):
@@ -4282,13 +4325,15 @@ class TestALiveWindowsRootIsKilledThroughItsPinnedHandle:
             children,
             start_id,
             sweep,
+            patch("kiro_crew.platform_compat.kill_process_group", return_value=True) as group_kill,
             patch(
-                "kiro_crew.platform_compat.kill_process_group", return_value=True
-            ) as group_kill,
-            patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)) as pid_kill,
+                "kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)
+            ) as pid_kill,
             # The recycled pid: no process object with the recorded creation time
             # can be opened any more, and the old identity owes no cleanup.
-            patch("kiro_crew.platform_compat.kill_process_tree_pinned", return_value=False) as drain,
+            patch(
+                "kiro_crew.platform_compat.kill_process_tree_pinned", return_value=False
+            ) as drain,
             patch("kiro_crew.platform_compat.windows_tree_cleanup_pending", return_value=False),
         ):
             await svc._force_reap("win-live1", _JOB_TIMEOUT_SECS + 60, claim=claim)
@@ -4370,7 +4415,9 @@ class TestALiveWindowsRootIsKilledThroughItsPinnedHandle:
             children,
             start_id,
             sweep,
-            patch("kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)) as pid_kill,
+            patch(
+                "kiro_crew.platform_compat.kill_pid_async", AsyncMock(return_value=True)
+            ) as pid_kill,
             patch(
                 "kiro_crew.platform_compat.kill_process_tree_pinned",
                 side_effect=OSError("Windows process tree did not drain before the deadline"),
@@ -4407,11 +4454,14 @@ class TestALiveWindowsRootIsKilledThroughItsPinnedHandle:
             sweep,
             patch("kiro_crew.platform_compat.kill_process_tree_pinned", side_effect=_drain),
         ):
-            assert await svc._sigkill_session("cron:win-live5", _handle_of(svc, "cron:win-live5")) is None
+            assert (
+                await svc._sigkill_session("cron:win-live5", _handle_of(svc, "cron:win-live5"))
+                is None
+            )
 
-        assert drained_on and all(ident != loop_thread for ident in drained_on), (
-            "the pinned drain ran on the event loop"
-        )
+        assert drained_on and all(
+            ident != loop_thread for ident in drained_on
+        ), "the pinned drain ran on the event loop"
 
 
 class TestProcessSurvived:
@@ -4530,7 +4580,9 @@ class TestProcessSurvived:
         with (
             patch("kiro_crew.platform_compat.get_process_start_id", return_value=_START_ID),
             patch("kiro_crew.platform_compat.pid_exists", return_value=False),
-            patch("kiro_crew.platform_compat.windows_tree_cleanup_pending", return_value=True) as pin,
+            patch(
+                "kiro_crew.platform_compat.windows_tree_cleanup_pending", return_value=True
+            ) as pin,
             patch("kiro_crew.platform_compat.pgroup_exists") as group,
         ):
             assert process_survived(self._handle()) is True
@@ -4616,12 +4668,18 @@ class TestTheScansLeaveTheLoop:
             threads.append(threading.get_ident())
             return _START_ID
 
-        return patch("kiro_crew.platform_compat.get_process_start_id", side_effect=_start_id), threads
+        return (
+            patch("kiro_crew.platform_compat.get_process_start_id", side_effect=_start_id),
+            threads,
+        )
 
     @pytest.mark.asyncio
     async def test_process_survived_async_runs_the_scan_on_a_worker_thread(self) -> None:
         handle = ProcessHandle(
-            pid=_UNALLOCATABLE_PID, start_id=_START_ID, pgid=None, child_pids={_UNALLOCATABLE_PID + 1: (_START_ID, "kiro-cli")}
+            pid=_UNALLOCATABLE_PID,
+            start_id=_START_ID,
+            pgid=None,
+            child_pids={_UNALLOCATABLE_PID + 1: (_START_ID, "kiro-cli")},
         )
         reads, threads = self._reads_off_the_loop()
         with (
@@ -4631,9 +4689,9 @@ class TestTheScansLeaveTheLoop:
         ):
             assert await process_survived_async(handle) is True
 
-        assert threads and all(ident != threading.get_ident() for ident in threads), (
-            "the per-child scan ran on the event loop"
-        )
+        assert threads and all(
+            ident != threading.get_ident() for ident in threads
+        ), "the per-child scan ran on the event loop"
 
     @pytest.mark.asyncio
     async def test_the_post_sweep_standing_read_runs_on_a_worker_thread(self) -> None:
@@ -4653,9 +4711,9 @@ class TestTheScansLeaveTheLoop:
             )
 
         assert failure is None
-        assert threads and all(ident != threading.get_ident() for ident in threads), (
-            "the post-sweep standing read ran on the event loop"
-        )
+        assert threads and all(
+            ident != threading.get_ident() for ident in threads
+        ), "the post-sweep standing read ran on the event loop"
 
     @pytest.mark.asyncio
     async def test_the_group_member_vouch_runs_on_a_worker_thread(self) -> None:
@@ -4675,9 +4733,9 @@ class TestTheScansLeaveTheLoop:
 
         assert failure is None
         group_kill.assert_called_once_with(pgid, platform_compat.SIGKILL)
-        assert threads and all(ident != threading.get_ident() for ident in threads), (
-            "the group-member vouch ran on the event loop"
-        )
+        assert threads and all(
+            ident != threading.get_ident() for ident in threads
+        ), "the group-member vouch ran on the event loop"
 
 
 class TestTheHandleOfATornDownSession:
@@ -4745,9 +4803,13 @@ class TestTheHandleOfAnOwnedPopen:
         monkeypatch.setattr(platform_compat, "IS_WINDOWS", False)
         pid = _UNALLOCATABLE_PID
         with (
-            patch("kiro_crew.platform_compat.get_process_start_id", return_value="7770001") as reads,
             patch(
-                "os.getpgid", side_effect=ProcessLookupError("[Errno 3] No such process"), create=True
+                "kiro_crew.platform_compat.get_process_start_id", return_value="7770001"
+            ) as reads,
+            patch(
+                "os.getpgid",
+                side_effect=ProcessLookupError("[Errno 3] No such process"),
+                create=True,
             ),
         ):
             handle = process_handle_of(self._session_with_proc(pid, None))

@@ -472,7 +472,11 @@ class TestAnAbortedTeardownStillFinishesItsClaim:
         svc._sessions.reset = AsyncMock(side_effect=RuntimeError("reset failed"))
 
         async def _sigkill_raises(
-            _session_key: str, _handle: object = None, *, who: str = "Reaper"
+            _session_key: str,
+            _handle: object = None,
+            *,
+            who: str = "Reaper",
+            popped: object = None,
         ) -> None:
             raise OSError("killpg refused")
 

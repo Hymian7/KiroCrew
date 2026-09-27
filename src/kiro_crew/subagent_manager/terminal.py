@@ -794,7 +794,10 @@ class TerminalCoordinator(ManagerComponent):
                         logger.warning("Reaper: reset hung for %s, attempting SIGKILL", agent_id)
                         targets, missing = kill_set(handles, popped, seen=seen)
                         kill_failed = join_failures(
-                            await self._manager._sigkill_sessions(session_key, targets), missing
+                            await self._manager._sigkill_sessions(
+                                session_key, targets, popped=popped
+                            ),
+                            missing,
                         )
                     except Exception:
                         logger.exception(
@@ -802,7 +805,10 @@ class TerminalCoordinator(ManagerComponent):
                         )
                         targets, missing = kill_set(handles, popped, seen=seen)
                         kill_failed = join_failures(
-                            await self._manager._sigkill_sessions(session_key, targets), missing
+                            await self._manager._sigkill_sessions(
+                                session_key, targets, popped=popped
+                            ),
+                            missing,
                         )
                     else:
                         # A completed reset -- True, or False for a key the run's own
@@ -824,7 +830,7 @@ class TerminalCoordinator(ManagerComponent):
                                 agent_id,
                             )
                             kill_failed = await self._manager._sigkill_sessions(
-                                session_key, survivors
+                                session_key, survivors, popped=popped
                             )
                         kill_failed = join_failures(kill_failed, missing)
                     # Read after the passes, fence still up: a cold start under the
@@ -1141,15 +1147,30 @@ class TerminalCoordinator(ManagerComponent):
         return handles
 
     async def _sigkill_sessions_impl(
-        self, session_key: str, handles: list[ProcessHandle]
+        self,
+        session_key: str,
+        handles: list[ProcessHandle],
+        *,
+        popped: "list[tuple[Any, ProcessHandle]] | None" = None,
     ) -> str | None:
-        """Kill every handle's process (:func:`kiro_crew.process_identity.kill_each`); the failures joined, or None."""
+        """Kill every handle's process (:func:`kiro_crew.process_identity.kill_each`); the failures joined, or None.
+
+        ``popped`` is the caller's captured pop, forwarded so each kill can release
+        the lease of the session its own reset destroyed even when that reset was
+        cancelled before ``provider.shutdown()`` -- the case where the manager's
+        torn-down table has already unwound and holds nothing.
+        """
         return await kill_each(
-            handles, lambda handle: self._manager._sigkill_session(session_key, handle)
+            handles,
+            lambda handle: self._manager._sigkill_session(session_key, handle, popped=popped),
         )
 
     async def _sigkill_session_impl(
-        self, session_key: str, handle: ProcessHandle | None
+        self,
+        session_key: str,
+        handle: ProcessHandle | None,
+        *,
+        popped: "list[tuple[Any, ProcessHandle]] | None" = None,
     ) -> str | None:
         """Best-effort SIGKILL when graceful reset hangs.
 
@@ -1186,8 +1207,63 @@ class TerminalCoordinator(ManagerComponent):
         if handle is None:
             logger.warning("Reaper: no session found for %s", session_key)
             return None
+        # Imported HERE, not at the top of the module, and structurally required
+        # rather than a style choice: ``bind_component_globals`` rebuilds every
+        # ``*_impl`` with ``subagent``'s module dict as its ``__globals__``
+        # (``subagent_manager/_component.py``), whose own docstring states the
+        # consequence -- "an import at the top of its defining module is inert for
+        # it. Every global it loads must resolve in ``namespace`` -- add the name
+        # there, or import it inside the function." A top-level import here would
+        # raise NameError at the first call, and the alternative is adding these two
+        # names to another module's globals.
+        from kiro_crew.process_identity import release_teardown_lease
+        from kiro_crew.runtime_ownership import authorize_runtime_kill
+
+        # Ownership, asked once before the verified kill. The recycle check
+        # inside it answers a different question -- whether this pid is still
+        # the process we recorded -- and a yes to that is not a yes to this:
+        # with session sharing on, the process this sub-agent ran on also
+        # carries its parent and its siblings, and the graceful reset this
+        # ladder is the fallback for hung for ONE of them.
+        #
+        # The run's OWN lease goes first, through the helper the cron reaper
+        # shares, so the two teardown paths cannot drift: a gate asked while the
+        # subject still holds its lease lets the session being destroyed refuse
+        # its own last-resort kill. What the release leaves is another owning
+        # session's lease and every tenancy on the process -- and the tenancy is
+        # how a session-sharing sub-agent is represented, since at cap=1 it holds
+        # no lease. The gate reads both, so a co-tenant mid-turn still refuses.
+        # The captured pop goes with it: a reset abandoned on its timeout has
+        # already unwound the scope that made the subject readable through
+        # ``tearing_down``, and the caller's pop is then the only thing that still
+        # names the session whose lease must go before the gate is asked.
+        await release_teardown_lease(
+            self._manager._sessions, session_key, handle, who="Reaper", popped=popped
+        )
+
+        # A refusal withholds the tree signal AND the escaped-children sweep. The
+        # recorded child set is the SHARED root's whole descendant tree, not this
+        # run's alone -- with session sharing on it holds the co-tenant's MCP and
+        # node children -- so sweeping it after sparing the root would spare the
+        # process and kill the processes it depends on, which is worse than either
+        # ending it or leaving it alone. The refusal is RETURNED so the caller's
+        # record cannot say the run was reaped, and the surviving tree stays the
+        # reconciler's to count.
+        helpers = child_process_helpers()
+        if handle.pid and not authorize_runtime_kill(
+            handle.pid,
+            reason=f"graceful reset hung for {session_key}",
+            caller="subagent_manager.terminal._sigkill_session_impl",
+        ):
+            logger.warning(
+                "Reaper: another session holds a lease on PID %d; leaving its tree to the "
+                "reconciler for %s",
+                handle.pid,
+                session_key,
+            )
+            return "RuntimeOwnership: a session still holds a lease on the runtime"
         return await kill_verified_process(
-            handle, who="Reaper", key=session_key, child_helpers=child_process_helpers()
+            handle, who="Reaper", key=session_key, child_helpers=helpers
         )
 
     def notify_injection_failed_impl(

@@ -87,11 +87,13 @@ from kiro_crew.process_identity import (
     kill_verified_process,
     process_handle_of,
     process_survived_async,
+    release_teardown_lease,
     spawn_in_flight,
     teardown_capture,
     with_kill_failure,
 )
 from kiro_crew.resource_status import admission_check
+from kiro_crew.runtime_ownership import authorize_runtime_kill
 from kiro_crew.validation import CHANNEL_MAX_LEN, MAX_CRON_MESSAGE, MAX_SHORT_STRING
 
 logger = logging.getLogger(__name__)
@@ -3144,13 +3146,15 @@ class CronService:
             logger.warning("%s: reset hung for cron %s, attempting SIGKILL", who, job_id)
             targets, missing = kill_set(handles, popped, seen=seen)
             failure = join_failures(
-                await self._sigkill_sessions(session_key, targets, who=who), missing
+                await self._sigkill_sessions(session_key, targets, who=who, popped=popped),
+                missing,
             )
         except Exception:
             logger.exception("%s: reset failed for cron %s, attempting SIGKILL", who, job_id)
             targets, missing = kill_set(handles, popped, seen=seen)
             failure = join_failures(
-                await self._sigkill_sessions(session_key, targets, who=who), missing
+                await self._sigkill_sessions(session_key, targets, who=who, popped=popped),
+                missing,
             )
         else:
             targets, missing = kill_set(handles, popped, seen=seen)
@@ -3160,20 +3164,39 @@ class CronService:
                 logger.warning(
                     "%s: process survived the reset for cron %s, attempting SIGKILL", who, job_id
                 )
-                failure = await self._sigkill_sessions(session_key, survivors, who=who)
+                failure = await self._sigkill_sessions(
+                    session_key, survivors, who=who, popped=popped
+                )
             failure = join_failures(failure, missing)
         return failure, [session for session, _handle in popped]
 
     async def _sigkill_sessions(
-        self, session_key: str, handles: list[ProcessHandle], *, who: str = "Reaper"
+        self,
+        session_key: str,
+        handles: list[ProcessHandle],
+        *,
+        who: str = "Reaper",
+        popped: list[tuple[Any, ProcessHandle]] | None = None,
     ) -> str | None:
-        """Kill every handle's process (:func:`kiro_crew.process_identity.kill_each`); the failures joined, or None."""
+        """Kill every handle's process (:func:`kiro_crew.process_identity.kill_each`); the failures joined, or None.
+
+        ``popped`` is the caller's captured pop, forwarded so each kill can release
+        the lease of the session its own reset destroyed even when that reset was
+        cancelled before ``provider.shutdown()`` -- the case where the manager's
+        torn-down table has already been unwound and holds nothing.
+        """
         return await kill_each(
-            handles, lambda handle: self._sigkill_session(session_key, handle, who=who)
+            handles,
+            lambda handle: self._sigkill_session(session_key, handle, who=who, popped=popped),
         )
 
     async def _sigkill_session(
-        self, session_key: str, handle: ProcessHandle | None, *, who: str = "Reaper"
+        self,
+        session_key: str,
+        handle: ProcessHandle | None,
+        *,
+        who: str = "Reaper",
+        popped: list[tuple[Any, ProcessHandle]] | None = None,
     ) -> str | None:
         """Best-effort SIGKILL when the graceful reset hangs, fails, or left the process standing.
 
@@ -3207,6 +3230,47 @@ class CronService:
             # snapshot -- a successor, not this run's process.
             logger.warning("%s: no session found for %s", who, session_key)
             return None
+        # Ownership, asked once before the escalation below starts. The gate answers
+        # from two tables and refuses on either: a LEASE, held by the session that
+        # owns the runtime, and a TENANCY, held by a party mid-flight on the process
+        # without owning it. At cap=1 a session-sharing sub-agent takes no lease --
+        # an acquisition cannot join an occupied runtime -- so the tenancy table is
+        # what speaks for it, and the gate reads that too. A refusal for a tenant is
+        # not this caller's mistake: the answer is to let the tenant finish, and its
+        # own last release hands the orphan back for teardown.
+        #
+        # The run's OWN lease is released first, and that ordering is the whole
+        # correctness of the gate here. A reset releases the lease inside
+        # ``provider.shutdown()``, so every await before it -- the ended-record
+        # write, the queue unlink, the child probes -- is a point where the
+        # teardown can hang or raise and land on this path with the lease still
+        # held. Asking the gate then would let the session being destroyed refuse
+        # its own last-resort kill: the wedged process would survive, and its pid
+        # would go on being refused by every sweep for the gateway's life while
+        # the run recorded a false "leased by another tenant". The rule this
+        # follows is the one the allocation path's own failure handler states --
+        # release before the kill, or the cleanup refuses its own teardown.
+        #
+        # What survives the release is a lease held by a DIFFERENT tenant, which
+        # is the only thing that may withhold the signal. A refusal is then
+        # reported the same way a refused pid is: as the thing that stopped the
+        # kill, so the run is never recorded as reaped over a process tree that is
+        # still standing.
+        # The captured pop goes with it: a reset this run abandoned on its timeout
+        # has already unwound the scope that made the subject readable through
+        # ``tearing_down``, and the pop the caller holds is then the only thing that
+        # still names the session whose lease must go before the gate is asked.
+        await release_teardown_lease(self._sessions, session_key, handle, who=who, popped=popped)
+        handle_pid = getattr(handle, "pid", None)
+        if isinstance(handle_pid, int) and not authorize_runtime_kill(
+            handle_pid,
+            reason=f"cron run teardown for {session_key}",
+            caller="cron._sigkill_session",
+        ):
+            logger.warning(
+                "%s: %s still leased by another tenant; not signalling it", who, session_key
+            )
+            return "runtime still leased by another tenant"
         # The client's child-tree probe, record capture and escaped-children sweep,
         # resolved through the session module at call time (circular import:
         # session → cron; and a test's patch of the client module is what the
