@@ -217,6 +217,42 @@ def drain_cgroup(procs: Path, timeout: float = DRAIN_TIMEOUT_SECS) -> list[str]:
         time.sleep(0.2)
 
 
+def halt_pod(cfg: PodConfig, name: str) -> subprocess.CompletedProcess:
+    """Stop pod *name*'s service and KEEP its isolated HOME.
+
+    The non-destructive half of :func:`stop_pod`, for the one caller that owes a
+    stop but not a reclamation: a failed ``pod up`` that started the unit itself
+    over a home which already held state. Stopping is owed because this invocation
+    started the gateway and the unit is ``Restart=on-failure`` with ``RestartSec=5``
+    and no ``StartLimit`` override, so a crash that is not in
+    ``RestartPreventExitStatus`` respawns every five seconds indefinitely -- the
+    5s gap never fills systemd's default ten-second burst window, so the rate
+    limiter never retires it. Reclaiming is NOT owed, because ``cleanup_home``
+    rmtree's state that predates the invocation and nothing restores it.
+
+    Each backend's own stop is authoritative about the process and nothing here
+    touches the reclamation those paths perform after it, which is why this is a
+    sibling rather than a flag threaded through them.
+
+    The Linux hook refresh is load-bearing rather than copied: a unit installed by
+    an older build still carries the destructive ``ExecStopPost``, and
+    ``systemctl stop`` runs it -- so on that host a "keep the home" stop would
+    delete the home, which is the one thing this function exists not to do. An
+    unanswerable query counts as "hook present", and a failed reload refuses
+    instead of stopping, exactly as :func:`stop_pod` does.
+    """
+    with runtime.pod_name_mutex(cfg, name):
+        if runtime.IS_MACOS:
+            return launchd.stop(cfg, name)
+        if runtime.IS_WINDOWS:
+            return win_backend.stop(cfg, name)
+        if loaded_teardown_hook(cfg, name) is not False:
+            refused = _refresh_stale_unit(cfg)
+            if refused is not None:
+                return refused
+        return runtime.systemctl("stop", runtime.pod_unit(cfg, name))
+
+
 def stop_pod(cfg: PodConfig, name: str) -> subprocess.CompletedProcess:
     """Stop pod *name* and reclaim its isolated HOME, or say why it could not.
 

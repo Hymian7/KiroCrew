@@ -59,6 +59,10 @@ from kiro_crew.service.common import session_runtime_dir, systemctl_user_env
 from kiro_crew.subprocess_utf8 import UTF8_TEXT
 
 if TYPE_CHECKING:  # served by ``__getattr__`` at runtime; named here for mypy
+    from kiro_crew.pod.runtime_attestation import (  # noqa: F401
+        OWNER_POD,
+        port_owner,
+    )
     from kiro_crew.pod.runtime_boot import (  # noqa: F401
         boot,
         exec_in_pod,
@@ -73,6 +77,7 @@ if TYPE_CHECKING:  # served by ``__getattr__`` at runtime; named here for mypy
         health,
         mint_token,
         pod_api,
+        published_credential,
     )
     from kiro_crew.pod.runtime_home import (  # noqa: F401
         cleanup_home,
@@ -83,6 +88,7 @@ if TYPE_CHECKING:  # served by ``__getattr__`` at runtime; named here for mypy
     )
     from kiro_crew.pod.runtime_lifecycle import (  # noqa: F401
         RECLAIMED_MARKER,
+        halt_pod,
         install_backend,
         start_pod,
         stop_pod,
@@ -1288,9 +1294,11 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "_authenticated_url",
         "_mint_403_cause",
         "_pod_mint_secret",
+        "_pod_secret_candidates",
         "_pod_secret_path",
         "_probe_health",
         "_read_capped",
+        "_read_pod_secret_file",
         "_scrub_json_tokens",
         "_scrub_token",
         "_scrub_token_string",
@@ -1302,6 +1310,7 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "loopback_urlopen",
         "mint_token",
         "pod_api",
+        "published_credential",
         "unix_socket_urlopen",
     ),
     "kiro_crew.pod.runtime_home": (
@@ -1357,6 +1366,7 @@ _EXPORTS_BY_OWNER: dict[str, tuple[str, ...]] = {
         "_write_and_load_unit",
         "cgroup_procs_file",
         "drain_cgroup",
+        "halt_pod",
         "install_backend",
         "loaded_teardown_hook",
         "start_pod",
