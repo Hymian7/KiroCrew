@@ -3491,6 +3491,12 @@ def _interleave_foreign_lines(
     return merged
 
 
+#: Foreign lines already reported per slot key, so a re-scan of the same kept
+#: lines stays quiet. Bounded: an evicted key only costs one repeated warning.
+_FOREIGN_REPORTED: OrderedDict[str, int] = OrderedDict()
+_FOREIGN_REPORTED_MAX = 256
+
+
 def _frozen_prefix_and_foreign_appends(
     slot: _ChatSlot,
     path,
@@ -3828,6 +3834,20 @@ def _frozen_prefix_and_foreign_appends(
     # (mtime, size) must re-emit these same preserved foreign lines rather than
     # drop them — hence they are cached here, not just at the post-write site.
     slot._frozen_prefix_cache = (mtime, size, disk_older, prefix, foreign)
+    # Kept lines never fold back into the window, so every re-scan finds them
+    # again; warn only about the ones not reported before for this slot.
+    reported = _FOREIGN_REPORTED.pop(slot.key, 0)
+    if foreign:
+        if len(foreign) > reported:
+            logger.warning(
+                "Slot %s save found %d new line(s) another writer appended; keeping %d",
+                slot.key,
+                len(foreign) - reported,
+                len(foreign),
+            )
+        _FOREIGN_REPORTED[slot.key] = len(foreign)
+        if len(_FOREIGN_REPORTED) > _FOREIGN_REPORTED_MAX:
+            _FOREIGN_REPORTED.popitem(last=False)
     return (prefix, foreign, dedup_dropped)
 
 

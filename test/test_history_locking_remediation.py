@@ -2109,6 +2109,43 @@ class TestForeignFoldMidIdentity:
         )
         assert len(foreign) == 1
 
+    def test_a_save_that_keeps_foreign_lines_logs_one_warning(self, tmp_path, monkeypatch, caplog):
+        """A save that keeps another writer's lines says so once, with the
+        count; a re-scan of the same lines, or a save with nothing foreign, is quiet.
+        """
+        import logging
+
+        mine = {"role": "user", "content": "mine", "ts": "T1", "meta": {"mid": "m-1"}}
+        other = {"role": "assistant", "content": "theirs", "ts": "T2", "meta": {"mid": "m-2"}}
+        name = "kc_warn_foreign"
+        caplog.set_level(logging.WARNING, logger="kiro_crew.dashboard.chat_persistence")
+
+        def warned():
+            return [
+                r.getMessage()
+                for r in caplog.records
+                if "another writer appended" in r.getMessage()
+            ]
+
+        _p, foreign, _d = self._fold(tmp_path, monkeypatch, name, [mine, other], [mine])
+        assert len(foreign) == 1
+        assert len(warned()) == 1
+        assert " found 1 new line(s) " in warned()[0]
+        assert name in warned()[0]
+        assert "theirs" not in warned()[0], "no message content in the log"
+
+        # A re-scan of the same kept line (e.g. after a trim drops the cache)
+        # must not report it again.
+        caplog.clear()
+        _p, foreign, _d = self._fold(tmp_path, monkeypatch, name, [mine, other], [mine])
+        assert len(foreign) == 1
+        assert warned() == []
+
+        caplog.clear()
+        _p, foreign, _d = self._fold(tmp_path, monkeypatch, name, [mine], [mine])
+        assert foreign == []
+        assert warned() == []
+
 
 class TestBestEffortSaveMarksDirty:
     """GPT 5.6 HIGH (chat_persistence.py:1087): metadata mutation endpoints
