@@ -140,6 +140,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -275,7 +276,11 @@ DEFAULT_ERR_RES = (
 #: same flag is given twice the LAST one wins, as argparse resolves it, so
 #: ``-n 4 -n auto`` ends up budgeted and is quiet -- that half is read from the
 #: argv tokens (``_argv_worker_pool_is_budgeted``), since a joined command line
-#: cannot express "the last one".
+#: cannot express "the last one". The tokens settle two more things the joined
+#: line cannot: pytest's ``--`` ends its options, so a ``-n0`` behind it is a
+#: path and never the run's count; and ``-o addopts=...`` / ``--override-ini
+#: addopts=...`` replace the ``addopts`` the run starts from, so their ``-n`` is
+#: folded in AHEAD of the run's own tokens, exactly where pytest puts it.
 #:
 #: What the rule cannot read is the checkout: ``auto`` is budgeted by THIS tree's
 #: conftest, and the probe already keys the stop on ``cwd=fleet`` for exactly
@@ -1635,6 +1640,20 @@ _CAP_FLAGS = ("-n", "--numprocesses")
 #: other hook-resolved spelling (``pytest_xdist_auto_num_workers`` answers both).
 _BUDGETED_COUNT_WORDS = frozenset({"auto", "logical"})
 
+#: The ini-override flags, as ARGV tokens. ``-o addopts=...`` / ``--override-ini
+#: addopts=...`` replace the tree's ``addopts`` with the value given, and pytest puts
+#: that value in front of the run's own arguments -- so an ``-n`` inside it is the
+#: run's count unless a later token of the run's own overrides it.
+_OVERRIDE_INI_FLAGS = ("-o", "--override-ini")
+
+#: The ini key whose override carries a worker count. Every other key is somebody
+#: else's setting and is not read.
+_ADDOPTS_KEY = "addopts"
+
+#: pytest's argparse terminator: every token after it is a file or a node id, however
+#: it is spelled, so a ``-n0`` behind it is a path and never the run's count.
+_END_OF_OPTIONS = "--"
+
 
 def _count_is_budgeted(value: str) -> bool:
     """Does this ``-n`` VALUE leave the worker pool budgeted or single-process?
@@ -1644,18 +1663,76 @@ def _count_is_budgeted(value: str) -> bool:
     digit run is a fixed count the host's state is never consulted about. Anything
     else is a value pytest rejects at argument parsing, and the answer is the
     fail-closed one for a monitoring control: not budgeted.
+
+    Judged LEXICALLY. The value is never converted to an integer: the interpreter
+    refuses to convert a run of more than a few thousand digits and refuses the
+    non-ASCII characters ``str.isdigit`` accepts (a superscript digit), and either refusal raised out
+    of ``_host_lines`` ends the patrol cycle for as long as that pid lives. A string
+    comparison has no such edge.
     """
     if value in _BUDGETED_COUNT_WORDS:
         return True
-    return value.isdigit() and int(value) < 2
+    if not (value.isascii() and value.isdigit()):
+        return False
+    return value.lstrip("0") in ("", "1")
+
+
+def _read_flag(tokens: list[str], index: int, flags: tuple[str, ...]) -> tuple[str | None, int]:
+    """Read ``tokens[index]`` as one of *flags*, the way argparse reads an option.
+
+    Returns the flag's value and the index of the first token not consumed, or
+    ``(None, index)`` when the token is none of the flags. A short flag carries its
+    value glued (``-n0``), after ``=`` (``-n=0``) or as the next token (``-n 0``); a
+    long flag after ``=`` or as the next token, and a longer token with no ``=``
+    (``--numprocesses-foo``) is a different option. A flag standing last with nothing
+    after it reads as the empty value, which nothing budgets.
+    """
+    token = tokens[index]
+    for flag in flags:
+        if not token.startswith(flag):
+            continue
+        rest = token[len(flag) :]
+        if rest.startswith("="):
+            return rest[1:], index + 1
+        if rest == "":
+            if index + 1 < len(tokens):
+                return tokens[index + 1], index + 2
+            return "", index + 1
+        if flag.startswith("--"):
+            continue
+        return rest, index + 1
+    return None, index
+
+
+def _addopts_override(tokens: list[str]) -> list[str] | None:
+    """The ``addopts`` an ``-o`` / ``--override-ini`` on the command line replaces the
+    tree's with, split into tokens as pytest splits them, or ``None`` when the run
+    starts from the tree's own ``addopts``.
+
+    Where the same key is overridden twice the last one wins, as pytest resolves it.
+    A value the shell-style splitter refuses (an unbalanced quote) is one pytest
+    refuses too, and it raises ``ValueError`` here rather than answering -- the
+    caller's fail-closed answer is the reporting one.
+    """
+    override: list[str] | None = None
+    index = 0
+    while index < len(tokens) and tokens[index] != _END_OF_OPTIONS:
+        value, index = _read_flag(tokens, index, _OVERRIDE_INI_FLAGS)
+        if value is None:
+            index += 1
+            continue
+        key, separator, ini_value = value.partition("=")
+        if separator and key.strip() == _ADDOPTS_KEY:
+            override = shlex.split(ini_value)
+    return override
 
 
 def _argv_worker_pool_is_budgeted(argv: list[str]) -> bool:
     """Is the RUNNER's effective worker count budgeted or single-process, read as TOKENS?
 
     The joined-line rule SELECTS a candidate: a pytest whose command line carries a
-    numeric ``-n`` of two or more somewhere after the runner. This decides. Two things
-    the joined text cannot read are read here:
+    numeric ``-n`` of two or more somewhere after the runner. This decides. What the
+    joined text cannot read is read here:
 
     * ``/proc`` hands arguments over NUL-separated, so an argument's own bytes can
       never be mistaken for syntax -- a ``|`` in a log format or a parametrized node id
@@ -1664,41 +1741,47 @@ def _argv_worker_pool_is_budgeted(argv: list[str]) -> bool:
       run and ``-n auto -n 4`` is not. The tokens are walked to the end and the final
       specification is the one judged; a lookahead that stops at the first number
       cannot say which came last.
+    * pytest's ``--`` ends its options. Every token behind it is a file or a node id,
+      so ``-n32 -- -n0`` is a 32-worker run pointed at a path called ``-n0``, and the
+      walk stops there.
+    * ``-o addopts=...`` / ``--override-ini addopts=...`` replace the ``addopts`` the
+      run starts from, and pytest puts that value IN FRONT of the run's own arguments.
+      The override's tokens are walked first, so ``-o addopts='-n 16'`` is a 16-worker
+      run, and ``-o addopts='-n 16' -n auto`` is budgeted by the run's own last word.
 
     No ``-n`` at all is budgeted: the default ``addopts`` supply ``-n auto``, and
     reporting a bare pytest would flag every targeted single-file run a worker makes.
+    An override that supplies none runs one process with xdist inactive, which is the
+    same answer.
 
     What it must not do is read SOMEBODY ELSE's option as the runner's. ``nice -n 10
     pytest test/`` has no worker count of its own -- the ``10`` is a priority -- and
     ``xvfb-run -n`` is the same shape; both launchers this scan recognises. So the scan
     starts after the runner's own token, and when no runner token stands alone it
     declines to answer at all, which reports (fail-closed) rather than exonerates.
+
+    It reads argv and nothing else. ``-c other.ini`` names a file whose ``addopts``
+    this reader does not open, and ``--noconftest`` / ``--confcutdir`` decide which
+    ``conftest.py`` loads; the checkout, not the command line, is where those are
+    answered, and the probe already keys the stop on ``cwd=fleet`` for that reason.
     """
     runner = _runner_token_index(argv)
     if runner is None:
         return False
+    own = argv[runner + 1 :]
+    try:
+        override = _addopts_override(own)
+    except ValueError:
+        return False
+    tokens = [*override, *own] if override is not None else own
     effective: str | None = None
-    index = runner + 1
-    while index < len(argv):
-        token = argv[index]
-        index += 1
-        for flag in _CAP_FLAGS:
-            if not token.startswith(flag):
-                continue
-            rest = token[len(flag) :]
-            # ``-n0`` glued, ``-n=0``, or ``-n`` with the count as its own token.
-            if rest.startswith("="):
-                rest = rest[1:]
-            elif rest == "":
-                if index < len(argv):
-                    rest = argv[index]
-                    index += 1
-            elif flag == "--numprocesses":
-                # ``--numprocessesN`` is not a spelling this flag has; a longer token
-                # starting with it is a different option (``--numprocesses-foo``).
-                continue
-            effective = rest
-            break
+    index = 0
+    while index < len(tokens) and tokens[index] != _END_OF_OPTIONS:
+        value, index = _read_flag(tokens, index, _CAP_FLAGS)
+        if value is None:
+            index += 1
+            continue
+        effective = value
     if effective is None:
         return True
     return _count_is_budgeted(effective)

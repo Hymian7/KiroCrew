@@ -1206,7 +1206,7 @@ class TestAdmissionIsSizedOnDelivery:
         """The rule flags a run whose worker pool bypasses the budget: an explicit
         numeric ``-n`` of two or more. ``auto`` and a bare pytest are the budgeted
         forms (the bare one inherits ``-n auto`` from ``addopts``) and are quiet, as
-        are the single-process ``-n0`` / ``-n 1`` (#13814)."""
+        are the single-process ``-n0`` / ``-n 1``."""
         admission = _flat(_skill_section(self.HEADING))
         assert "bypasses the budget" in admission
         assert "two or more" in admission
@@ -1214,7 +1214,7 @@ class TestAdmissionIsSizedOnDelivery:
         assert "inherits the project's `addopts`" in admission
         assert "`-n0` and `-n 1` are quiet" in admission
         assert "last one wins" in admission
-        # The pre-#13814 wording, which described the inverted sense.
+        # The inverted sense, which the admission must not describe.
         assert "not explicitly chosen" not in admission
         assert "bare `pytest` is therefore flagged" not in admission
 

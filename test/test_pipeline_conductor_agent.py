@@ -531,7 +531,7 @@ class TestFleetProbe:
         assert "pid=4343" not in out  # the budgeted -n auto run is legitimate
 
     def test_every_budgeted_pytest_spelling_is_legitimate(self, tmp_path, capsys, monkeypatch):
-        """The issue's own verdict table (#13814), row by row, plus the spellings the
+        """The verdict table, row by row, plus the spellings the
         ruling names: budgeted and single-process forms are quiet, an explicit count
         of two or more is reported.
 

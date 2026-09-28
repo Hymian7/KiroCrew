@@ -52,7 +52,7 @@ SCRIPT = (
 KEY = "dashboard_chat-601-1788099254"
 
 #: The one pytest shape the built-in rule reports: an explicit worker COUNT of two or more,
-#: which bypasses the memory budget the rootdir hook applies to ``auto`` (see #13814). A
+#: which bypasses the memory budget the rootdir hook applies to ``auto``. A
 #: fixture that needs a reportable run carries this so the rest of its argv stays about
 #: the property under test. Glued, so ``cmd=`` prints it as the bare flag name ``-n``
 #: with nothing counted for the value -- the digits are withheld like every value.
@@ -2197,11 +2197,13 @@ RUNNER_FORMS = {
 }
 
 # Every spelling that leaves the worker pool BUDGETED or single-process, and therefore
-# quiet (#13814). `auto` and `logical` hand the count to the rootdir hook, which sizes the
+# quiet. `auto` and `logical` hand the count to the rootdir hook, which sizes the
 # pool by memory and by the host's other runs; no `-n` at all inherits `-n auto` from the
 # default `addopts`; `0` and `1` run one process with xdist inactive. The last entry is
 # argparse's own rule -- a repeated option is resolved last-wins -- so `-n 4 -n auto` is
-# a budgeted run.
+# a budgeted run. Behind pytest's `--` every token is a path, so a count there is not the
+# run's; and an `-o addopts=...` override is walked BEFORE the run's own tokens, where
+# pytest puts it, so the run's own last `-n` still wins over the override's.
 BUDGETED_SPELLINGS = {
     "absent": [],
     "auto-split": ["-n", "auto"],
@@ -2219,11 +2221,20 @@ BUDGETED_SPELLINGS = {
     "long-equals-zero": ["--numprocesses=0"],
     "long-split-one": ["--numprocesses", "1"],
     "last-wins-auto": ["-n", "4", "-n", "auto"],
+    "single-process-then-terminator": ["-n0", "--", "-n32"],
+    "count-behind-terminator": ["--", "-n", "4"],
+    "override-then-own-auto": ["-o", "addopts=-n 16", "-n", "auto"],
+    "override-last-wins-auto": ["--override-ini=addopts=-n 16", "--override-ini=addopts=-n auto"],
+    "override-supplies-none": ["-o", "addopts="],
+    "override-of-another-key": ["-o", "testpaths=test", "-n", "auto"],
 }
 
 # Every spelling of an explicit worker COUNT of two or more: the form that bypasses the
 # budget hook (`setup.cfg`: "An explicit -n <N> bypasses the budget") and the one the rule
-# reports. The last entry is last-wins in the reporting direction.
+# reports. `last-wins-four` is last-wins in the reporting direction; the terminator row
+# is a 32-worker run pointed at a path called `-n0`; the override rows carry the count in
+# the `addopts` an `-o` / `--override-ini` replaces the tree's with; the oversized row is
+# a count longer than the interpreter converts, judged lexically like every other.
 UNBUDGETED_SPELLINGS = {
     "glued-four": ["-n4"],
     "split-four": ["-n", "4"],
@@ -2233,6 +2244,12 @@ UNBUDGETED_SPELLINGS = {
     "long-equals-four": ["--numprocesses=4"],
     "long-split-two": ["--numprocesses", "2"],
     "last-wins-four": ["-n", "auto", "-n", "4"],
+    "count-then-terminator-then-zero": ["-n32", "--", "-n0"],
+    "override-long-equals": ["--override-ini=addopts=-n 16"],
+    "override-short-split": ["-o", "addopts=-n 16"],
+    "override-short-glued": ["-oaddopts=-n 16"],
+    "override-auto-then-own-four": ["-o", "addopts=-n auto", "-n", "4"],
+    "oversized-count": ["-n", "9" * 5000],
 }
 
 # Tokens that appear AFTER the cap and name the runner without being an invocation of
@@ -2405,7 +2422,7 @@ def test_every_runner_form_stays_quiet_when_its_worker_pool_is_budgeted(
     This is the direction that destroys work: the documented answer to a fleet-owned
     ``BANNED`` line is to stop that worker and discard the turn it was in, so a false
     row here costs real work rather than signal -- and the gate runner's own
-    ``-n auto`` was exactly such a row before #13814.
+    ``-n auto`` is exactly such a row under an inverted rule.
     """
     prefixes = install_prefixes(tmp_path)
     root = host_proc(tmp_path, monkeypatch)
@@ -2427,7 +2444,7 @@ def test_every_runner_form_is_reported_when_it_fixes_a_worker_count(
     The other direction, and the one the probe exists for. A form or a spelling missing
     here is an unbudgeted run the conductor's banned counter cannot see, so intake keeps
     admitting work while the host is being consumed -- ``pytest -n 32`` on a shared box
-    was invisible before #13814.
+    is invisible to an inverted rule.
     """
     prefixes = install_prefixes(tmp_path)
     root = host_proc(tmp_path, monkeypatch)
@@ -2447,8 +2464,8 @@ def test_a_capped_run_stays_quiet_when_a_later_argument_names_the_runner(
     """A single-process run stays one when a LATER argument spells the runner's name.
 
     ``--junitxml=build/pytest.xml`` and ``--log-file /var/tmp/pytest-run.log`` are
-    ordinary arguments. Under the pre-#13814 sense a forward-only lookahead re-tried at
-    that second occurrence, where the ``-n0`` was behind it, and reported the run --
+    ordinary arguments. A forward-only lookahead re-tries at that second occurrence,
+    where the ``-n0`` is behind it, and reports the run --
     two deterministic false rows on a live fleet. The rows stay pinned: a second runner
     token must never be read as a second, differently-counted invocation.
     """
@@ -3643,6 +3660,118 @@ def test_the_count_reader_reads_every_spelling_its_flags_have(mod):
     # The value pytest itself rejects at argument parsing: fail-closed, so it reports.
     assert not mod._argv_worker_pool_is_budgeted(["pytest-3", "-n", "4abc", "test/"])
     assert not mod._argv_worker_pool_is_budgeted(["pytest-3", "-n"])
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("9" * 5000, id="more-digits-than-the-interpreter-converts"),
+        pytest.param("\u00b2", id="a-character-isdigit-accepts-and-int-refuses"),
+        pytest.param("\u0664", id="a-non-ascii-decimal-digit"),
+    ],
+)
+def test_the_count_is_judged_lexically_so_no_value_can_raise(mod, tmp_path, monkeypatch, value):
+    """No ``-n`` value, however long or however spelled, raises out of the reader.
+
+    The reader runs inside ``_host_lines`` with nothing above it catching a ``ValueError``,
+    so a value the interpreter refuses to convert -- a run of digits past its conversion
+    limit, or a character ``str.isdigit`` accepts and ``int`` does not -- ends the patrol
+    cycle, and ends it again on every cycle while that pid lives. The count is compared as
+    a string instead. Every such value is also a count no budget bounds, so the answer is
+    the reporting one; ``-n0`` under the same fixture stays quiet so the reporting is not
+    the fixture's.
+    """
+    assert mod._count_is_budgeted(value) is False
+    assert mod._argv_worker_pool_is_budgeted(["pytest-3", "-n", value, "test/"]) is False
+    root = host_proc(tmp_path, monkeypatch)
+    fleet = tmp_path / "wt"
+    fleet.mkdir()
+    fleet_pid(root, fleet, "451", ["pytest-3", "-n", value, "test/"])
+    fleet_pid(root, fleet, "452", ["pytest-3", "-n0", "test/"])
+    assert banned_pids(mod, root, fleet) == {"451"}
+
+
+def test_leading_zeros_do_not_change_which_count_is_single_process(mod):
+    """``0``, ``00``, ``01`` and ``001`` are the single-process counts pytest reads them as;
+    ``02`` and ``010`` are fixed pools of two and ten. Judged on the digits after the
+    leading zeros, so the lexical rule agrees with integer conversion everywhere the
+    latter would have answered."""
+    for single in ("0", "00", "1", "01", "001"):
+        assert mod._count_is_budgeted(single) is True, single
+    for fixed in ("2", "02", "010", "32"):
+        assert mod._count_is_budgeted(fixed) is False, fixed
+    assert mod._count_is_budgeted("") is False
+
+
+def test_the_terminator_ends_the_walk_for_the_runs_own_count(mod):
+    """``--`` is where pytest stops reading options, and so does the reader.
+
+    ``pytest -n32 -- -n0`` is a 32-worker run pointed at a path called ``-n0``; a walk
+    that read the second token as the count would let that run through on last-wins.
+    The converse holds too: ``-n0 -- -n32`` is one process pointed at a path, and
+    ``-- -n 4`` names two paths and inherits ``addopts``. A ``--`` inside an
+    ``addopts`` override terminates the run's own options as well, because pytest
+    prepends the override to them.
+    """
+    assert mod._argv_worker_pool_is_budgeted(["pytest", "-n32", "--", "-n0"]) is False
+    assert mod._argv_worker_pool_is_budgeted(["pytest", "-n0", "--", "-n32"]) is True
+    assert mod._argv_worker_pool_is_budgeted(["pytest", "--", "-n", "4"]) is True
+    assert mod._argv_worker_pool_is_budgeted(["pytest", "-o", "addopts=--", "-n", "4"]) is True
+
+
+def test_an_addopts_override_is_walked_before_the_runs_own_tokens(mod, tmp_path, monkeypatch):
+    """``-o addopts=...`` / ``--override-ini addopts=...`` carry the count pytest starts from.
+
+    pytest replaces the tree's ``addopts`` with the override and puts its tokens in front
+    of the run's own, so ``-o addopts='-n 16'`` is a 16-worker run with no ``-n`` token of
+    its own -- a reader that only read the run's own tokens would call it budgeted and
+    drop it. The override is folded in first: its ``-n`` is the run's unless a later token
+    of the run's own overrides it, the last override of the same key wins, an override of
+    another key is not read, an override that supplies no ``-n`` runs one process, and a
+    value the splitter refuses (an unbalanced quote, which pytest refuses too) is answered
+    fail-closed. The alias path is where the fail-closed answer is observable: the joined
+    rule's scan does not cross an unbalanced quote, so ``pytest-3`` carries it.
+    """
+    reader = mod._argv_worker_pool_is_budgeted
+    assert reader(["pytest", "--override-ini=addopts=-n 16", "test/"]) is False
+    assert reader(["pytest", "-o", "addopts=-n 16", "test/"]) is False
+    assert reader(["pytest", "-oaddopts=-n 16", "test/"]) is False
+    assert reader(["pytest", "-o=addopts=-n 16", "test/"]) is False
+    assert reader(["pytest", "--override-ini", "addopts=-n 16", "test/"]) is False
+    assert reader(["pytest", "-o", "addopts=--numprocesses=16", "test/"]) is False
+    assert reader(["pytest", "-o", "addopts=-n auto", "-n", "4"]) is False
+    assert reader(["pytest", "-o", "addopts=-n 16", "-n", "auto"]) is True
+    assert reader(["pytest", "-o", "addopts=-n 16", "-o", "addopts=-n auto"]) is True
+    assert reader(["pytest", "-o", "addopts=-n auto", "-o", "addopts=-n 16"]) is False
+    assert reader(["pytest", "-o", "addopts="]) is True
+    assert reader(["pytest", "-o", "addopts=-q"]) is True
+    assert reader(["pytest", "-o", "testpaths=test", "test/"]) is True
+    assert reader(["pytest", "-o", "addopts=-n '16", "test/"]) is False
+    assert mod._addopts_override(["-o", "addopts=-n 16", "-n", "auto"]) == ["-n", "16"]
+    assert mod._addopts_override(["-n", "4", "test/"]) is None
+    assert mod._addopts_override(["--", "-o", "addopts=-n 16"]) is None
+    root = host_proc(tmp_path, monkeypatch)
+    fleet = tmp_path / "wt"
+    fleet.mkdir()
+    fleet_pid(root, fleet, "461", ["pytest-3", "-o", "addopts=-n '16", "test/"])
+    fleet_pid(root, fleet, "462", ["pytest-3", "-o", "addopts=-n '16'", "-n", "auto", "test/"])
+    assert banned_pids(mod, root, fleet) == {"461"}
+
+
+def test_the_reader_answers_from_argv_and_does_not_open_a_named_config(mod):
+    """``-c other.ini`` names a file; its ``addopts`` are the checkout's business.
+
+    The reader's contract is the command line: a count it can see there is judged, and a
+    count that would have to be read out of a file is not -- the probe keys the stop on
+    ``cwd=fleet`` for exactly the reason that the checkout decides what ``auto`` means.
+    Pinned so the boundary is a stated one: a run naming another config and no count of
+    its own inherits that config's ``addopts``, which this reader reports as budgeted, and
+    a count it does see under such a run is judged as everywhere else.
+    """
+    reader = mod._argv_worker_pool_is_budgeted
+    assert reader(["pytest", "-c", "other.ini", "test/"]) is True
+    assert reader(["pytest", "-c", "other.ini", "-n", "4", "test/"]) is False
+    assert reader(["pytest", "-c", "other.ini", "-n0", "test/"]) is True
 
 
 def test_the_readers_verdict_decides_every_detectable_shape(mod, tmp_path, monkeypatch):
