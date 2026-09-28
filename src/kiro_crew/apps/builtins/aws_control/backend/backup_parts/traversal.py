@@ -13,8 +13,12 @@ import os
 import stat
 import tarfile
 
+from kiro_crew.apps.builtins.aws_control.backend import storage
 from kiro_crew.apps.builtins.aws_control.backend.backup_parts import _FACADE_MODULE
-from kiro_crew.apps.builtins.aws_control.backend.backup_parts.identity import KIND_SESSIONS
+from kiro_crew.apps.builtins.aws_control.backend.backup_parts.identity import (
+    KIND_SESSIONS,
+    KIND_SNAPSHOT,
+)
 
 logger = logging.getLogger(_FACADE_MODULE)
 
@@ -68,6 +72,16 @@ _NO_PINNING_REASON = (
     "this platform does not provide. Walking these agent-writable directories by "
     "name would leave a window in which a directory swapped for a link could be "
     "archived and uploaded, so the backup is refused instead."
+)
+
+#: Why the snapshot backup is unavailable where its payload cannot be held from
+#: creation. Quoted verbatim to the owner by :func:`kind_unavailable_reason`, so the
+#: answer they get before pressing the button is the same one a failed run would give.
+_NO_HELD_PAYLOAD_REASON = (
+    "snapshot backups are unavailable on this platform: the snapshot payload is"
+    " written by the snapshot builder before this app can hold it open, and"
+    " without that hold another process running as the same user could replace"
+    " the file between the build and the upload without being detected"
 )
 
 
@@ -151,7 +165,14 @@ def kind_unavailable_reason(kind: str) -> str | None:
     Returns the prose reason so every surface quotes ONE explanation. Callers
     must treat a non-``None`` result as "offer this as unavailable", not as an
     error to log.
+
+    Both kinds are answered here, and each for its own reason: the sessions kind
+    needs descriptor-pinned traversal, the snapshot kind needs to hold its payload
+    from creation. A kind is unavailable when ITS OWN capability is missing, so one
+    being refused here says nothing about the other.
     """
     if kind == KIND_SESSIONS and not _CAN_PIN_TRAVERSAL:
         return _NO_PINNING_REASON
+    if kind == KIND_SNAPSHOT and not storage.body_bytes_can_be_held_from_creation():
+        return _NO_HELD_PAYLOAD_REASON
     return None
