@@ -8,6 +8,7 @@ import {
   type SensorOptions,
 } from '@dnd-kit/core'
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
+import { haptic } from '../lib/haptic'
 
 /**
  * The touch half of every drag surface in this app: a stationary press-and-hold
@@ -23,6 +24,13 @@ import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
  * visible on a desktop.
  */
 const TOUCH_HOLD_ACTIVATION = { delay: 250, tolerance: 5 } as const
+
+/**
+ * A hold that arms gives the finger nothing to see until it moves, so the arm
+ * itself is announced with a tap. Touch only: a mouse pick-up is visible under
+ * the cursor and the desktop has no engine to tap with anyway.
+ */
+const onTouchActivation = () => haptic('medium')
 
 export interface DndSensorOptions {
   /**
@@ -73,7 +81,7 @@ export interface DndSensorOptions {
  */
 export function useDndSensors({ distance, keyboard = false }: DndSensorOptions): SensorDescriptor<SensorOptions>[] {
   const mouse = useSensor(MouseSensor, { activationConstraint: { distance } })
-  const touch = useSensor(TouchSensor, { activationConstraint: TOUCH_HOLD_ACTIVATION })
+  const touch = useSensor(TouchSensor, { activationConstraint: TOUCH_HOLD_ACTIVATION, onActivation: onTouchActivation })
   // Called unconditionally -- hooks cannot be skipped - and passed as `null`
   // when unwanted. `useSensors` filters null descriptors itself, so this is the
   // library's own supported shape for an optional sensor.

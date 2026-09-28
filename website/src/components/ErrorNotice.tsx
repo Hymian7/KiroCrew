@@ -1,7 +1,9 @@
 import type { ComponentType, ReactNode } from 'react'
+import { useEffect } from 'react'
 import { AlertTriangle, Sparkles, X } from 'lucide-react'
 import AskAgentButton, { handoffErrorToAgent } from './AskAgentButton'
 import type { ErrorReport } from '../utils/errorReport'
+import { haptic } from '../lib/haptic'
 
 import { i18nT } from '../i18n/t'
 import { withOriginLink } from './withOriginLink'
@@ -220,6 +222,11 @@ export default function ErrorNotice({
    */
   testId?: string
 }) {
+  // A failure the user did not look for is announced through the hand as well
+  // as the eye. Keyed on the text so a re-render of the same notice stays
+  // quiet, and unconditional so the hook order survives the early return below.
+  useEffect(() => { if (message) haptic('error') }, [message])
+
   if (!message) return null
   // The secondary line: smaller than the title, lighter than the lead, but still
   // the alert's own colour -- it is the failure's text, demoted, not a caption.

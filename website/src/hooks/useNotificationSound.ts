@@ -5,6 +5,7 @@
 import { useEffect } from 'react'
 import { MC_NOTIFICATION_EVENT, MC_SOUND_SETTINGS_CHANGED_EVENT, type McNotificationDetail } from './notificationEvent'
 import { safeSetItem } from '../utils/safeStorage'
+import { haptic } from '../lib/haptic'
 
 export const SOUND_PRESETS = ['chime', 'ding', 'blip', 'pop', 'pulse'] as const
 export type SoundPreset = typeof SOUND_PRESETS[number] | 'none'
@@ -309,6 +310,10 @@ export function useNotificationSound(): void {
     const onNotification = (e: Event) => {
       const now = performance.now()
       if (now - lastPlayedAt < 300) return
+      // The buzz is not a sound preset: a phone in a pocket announces a finished
+      // turn the way it announces any notification, whatever the sound setting.
+      // Shares the debounce so a burst of events is one tap, not a rattle.
+      haptic('success')
       const kind = (e as CustomEvent<McNotificationDetail>).detail?.kind
       // Primary switch: enabled=false yields 'none' from presetForKind, so
       // WebAudio never plays. Kept as the single gate rather than a second

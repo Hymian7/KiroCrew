@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { animate, type MotionValue } from 'framer-motion'
 import { holdStreamingFlushes, releaseStreamingFlushes } from '../lib/streamHold'
 import { deepActiveElement } from '../utils/editableTarget'
+import { haptic } from '../lib/haptic'
 
 /**
  * Finger-tracking open/close gesture for a mobile edge panel — the sessions
@@ -1301,6 +1302,10 @@ export function useDrawerSwipe(
       // (a sibling instance's mutual exclusion) opens up now rather than in
       // ~300ms. `onSettle` still reports arrival, which is what may unmount.
       onCommitRef.current?.(target)
+      // Only a CHANGE of state taps: a release that lets the panel fall back to
+      // where it started is the gesture not happening, and the notch a real
+      // drawer makes when it seats is what this stands in for.
+      if (target !== startedOpen) haptic('light')
       settle(target ? 0 : closedOffset(), target, v)
     }
 

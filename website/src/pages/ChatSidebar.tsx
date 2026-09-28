@@ -46,6 +46,7 @@ import ModelDropdownList from '../components/ModelDropdownList'
 import { useAvailableModelsQuery } from '../hooks/useAvailableModels'
 import { useListboxKeyboard } from '../hooks/useListboxKeyboard'
 import { useDndSensors } from '../hooks/useDndSensors'
+import { haptic } from '../lib/haptic'
 import { useSessionPalette } from '../hooks/useSessionPalette'
 import { useMoveSlotToFolder } from '../hooks/useMoveSlotToFolder'
 import { ancestorsOf, buildLineage, descendantsOf, orphanCitation } from '../lib/sessionLineage'
@@ -7192,6 +7193,8 @@ function ChatSidebar({
   })
   const handleSidebarDragEnd = useCallback((event: DragEndEvent) => {
     resetSidebarDrag()
+    // Landed on something: the drop seats. A release over nothing is a cancel.
+    if (event.over) haptic('light')
     const { active, over } = event
     const a = active.data.current as {
       type?: string

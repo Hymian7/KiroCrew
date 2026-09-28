@@ -38,6 +38,7 @@ import { dictationSeparator, spliceDictationText } from '../../lib/dictationText
 import { useVoiceInput, voiceInputSupported, type TranscriptOrigin } from '../../hooks/useVoiceInput'
 import { usePushToTalk } from '../../hooks/usePushToTalk'
 import { redeliverPending } from '../../hooks/voiceTranscriptInbox'
+import { haptic } from '../../lib/haptic'
 
 /** How long the "dictation added" cue stays after a held transcript lands. */
 const HELD_LANDED_MS = 4000
@@ -647,6 +648,10 @@ export function useComposerVoice(host: ComposerVoiceHost) {
     lastDictationValueRef.current = null
     postStopEditedRef.current = false
     frozenCaretRef.current = null
+    // Here, past every gate, so a tap means the mic really opened: the engine
+    // takes a beat to show its level meter and the finger has already left the
+    // button. Covers the mic button and the push-to-talk key alike.
+    haptic('medium')
     setMicOwner(instanceId, sessionIdRef.current)
     startingRef.current = true
     const gen = ++startGenRef.current
@@ -661,6 +666,7 @@ export function useComposerVoice(host: ComposerVoiceHost) {
   const stopCapture = voice.stop
   const stopVoice = useCallback(() => {
     protectStoppedDictation()
+    haptic('medium')
     stopCapture()
   }, [protectStoppedDictation, stopCapture])
 

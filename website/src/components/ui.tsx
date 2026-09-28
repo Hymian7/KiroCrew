@@ -3,6 +3,7 @@ import { twMerge } from 'tailwind-merge'
 import { motion, useMotionValue, useSpring, useMotionTemplate, useReducedMotion } from 'framer-motion'
 import InfoTip from './InfoTip'
 import { i18nT } from '../i18n/t'
+import { haptic } from '../lib/haptic'
 
 /* ── Shared UI primitives ── */
 
@@ -436,8 +437,10 @@ export function Toggle({ checked, onChange, disabled, label, describedBy, tone =
       // user hears it before acting rather than discovering it by exploring.
       aria-describedby={describedBy}
       tabIndex={disabled ? -1 : 0}
-      onClick={() => !disabled && onChange(!checked)}
-      onKeyDown={e => { if (!disabled && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); onChange(!checked) } }}
+      // A switch is the one control whose physical twin clicks under the thumb, so
+      // it gets a tap where the device can give one (phones); elsewhere no-op.
+      onClick={() => { if (!disabled) { haptic(); onChange(!checked) } }}
+      onKeyDown={e => { if (!disabled && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); haptic(); onChange(!checked) } }}
       // `muted` is for a LIST of switches, where an accent fill on every row
       // shouts and duplicates a state the row's own grouping already carries.
       // The knob position still reads the state, so nothing is lost by dropping

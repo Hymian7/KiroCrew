@@ -6,6 +6,7 @@ import ErrorNotice from './ErrorNotice'
 import { ApiError } from '../api/client'
 import { isTerminalApprovalRefusal } from '../api/apiError'
 import { baseCommandLabel } from '../utils/trustPatterns'
+import { haptic } from '../lib/haptic'
 
 import { i18nT } from '../i18n/t'
 export default function ApprovalCard({ title, toolInput, showButtons, showTrust = true, hasCommand = true, baseCommand, baseDerivable, trustAllLabelKey, trustCommandLabelKey, trustBaseLabelKey, trustedLabelKeys, labelValues, onApprove }: {
@@ -58,6 +59,10 @@ export default function ApprovalCard({ title, toolInput, showButtons, showTrust 
   // decides which refusals keep their buttons (#11180).
   const handle = (d: string, pattern?: string) => {
     setFailure(null)
+    // The one tap in the chat that is a consequential decision: a refusal gets
+    // the heavier double-buzz so a thumb cannot mistake it for an approval it
+    // meant to give. Silent where the device has no engine.
+    haptic(d === 'rejected' ? 'error' : 'success')
     setDecided(d)
     Promise.resolve(onApprove(d, pattern)).catch((err: unknown) => {
       setDecided(null)
