@@ -735,6 +735,11 @@ async def _suspend_app_for_session_approval_reconsent(
 
 async def handle_install_app(request: web.Request) -> web.Response:
     """POST /api/apps/install — install an app from a local path."""
+    from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+
+    denied = await require_owner_dashboard_request(request, "app_install")
+    if denied is not None:
+        return denied
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -883,6 +888,14 @@ async def _refuse_while_startup_hook_runs(name: str, *, action: str) -> web.Resp
 
 async def handle_update_app(request: web.Request) -> web.Response:
     """POST /api/apps/{name}/update — update an installed app from its source path."""
+    # Dashboard subjects must be the owner. An app token reaching its own
+    # namespace is left to the repository-binding check further down.
+    if request.get("app", "") == "":
+        from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+
+        denied = await require_owner_dashboard_request(request, "app_update")
+        if denied is not None:
+            return denied
     name = request.match_info["name"]
     info = get_app(name)
     if not info:
@@ -2437,6 +2450,11 @@ async def handle_registry_install(request: web.Request) -> web.Response:
     Clones the repo, runs the install script, and registers the app.
     This can take a while so the response includes a log of what happened.
     """
+    from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+
+    denied = await require_owner_dashboard_request(request, "app_registry_install")
+    if denied is not None:
+        return denied
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -2516,6 +2534,11 @@ async def handle_registry_install_stream(request: web.Request) -> web.StreamResp
     The original ``/api/apps/registry/install`` endpoint is unchanged —
     CLI and other callers are not affected.
     """
+    from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+
+    denied = await require_owner_dashboard_request(request, "app_registry_install")
+    if denied is not None:
+        return denied
     try:
         body = await request.json()
     except json.JSONDecodeError:
@@ -4488,6 +4511,12 @@ async def handle_registries(request: web.Request) -> web.Response:
             resources=f"count={len(registries)} pinned={len(pinned)}",
         )
         return web.json_response({"registries": registries, "pinned": pinned})
+
+    from kiro_crew.dashboard.handlers._shared import require_owner_dashboard_request
+
+    denied = await require_owner_dashboard_request(request, "registries.update")
+    if denied is not None:
+        return denied
 
     def _deny(msg: str, resources: str = "") -> web.Response:
         sel().log_api_access(

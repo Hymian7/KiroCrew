@@ -3610,7 +3610,18 @@ class TestRegistryInstallStream:
 
     @asynccontextmanager
     async def _make_client(self):
-        app = web.Application()
+        from types import SimpleNamespace
+
+        # Stands in for token_auth_middleware authenticating the dashboard
+        # owner, which the registry-install owner gate requires.
+        @web.middleware
+        async def _owner(request, handler):
+            request["app"] = ""
+            request["user"] = "owner"
+            return await handler(request)
+
+        app = web.Application(middlewares=[_owner])
+        app["state"] = SimpleNamespace(owner_id="owner")
         register_app_routes(app)
         async with TestClient(TestServer(app)) as c:
             yield c
@@ -3877,7 +3888,18 @@ class TestRegistryInstallStreamSecurity:
 
     @asynccontextmanager
     async def _make_client(self):
-        app = web.Application()
+        from types import SimpleNamespace
+
+        # Stands in for token_auth_middleware authenticating the dashboard
+        # owner, which the registry-install owner gate requires.
+        @web.middleware
+        async def _owner(request, handler):
+            request["app"] = ""
+            request["user"] = "owner"
+            return await handler(request)
+
+        app = web.Application(middlewares=[_owner])
+        app["state"] = SimpleNamespace(owner_id="owner")
         register_app_routes(app)
         async with TestClient(TestServer(app)) as c:
             yield c
