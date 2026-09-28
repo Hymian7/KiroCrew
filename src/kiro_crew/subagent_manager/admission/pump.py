@@ -416,6 +416,13 @@ class _PumpMixin(ManagerComponent):
             registered = claim_will_register and point.agent_id in self._manager._agents
             if not registered and not claim_retained:
                 self.release_reservation(point.agent_id)
+            if registered:
+                # The drain counted this row as waiting when it popped it,
+                # before the claim moved it out of the claimable states. Now
+                # that it runs, the parent is owed a fresh count; without one
+                # the chip keeps "1 waiting" and the old wait reason forever.
+                started = self._manager._agents[point.agent_id]
+                self._manager._emit_queue_depth(started.parent_session_key, started.batch_id)
             if report_params is not None:
                 self._manager._report_queued_stop(report_params)
                 self._manager._emit_queue_depth(
