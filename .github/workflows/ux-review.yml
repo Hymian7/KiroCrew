@@ -376,6 +376,15 @@ jobs:
           # evidence -- so a description edit that changes WHICH evidence is
           # dropped moves the digest even though no kept file changed.
           #
+          # They go in as `pathlist:`, which digests their content with every
+          # line that starts with `/` reduced to its basename. $SHOTS holds
+          # "$DEST_DIR/$name" lines, so its raw bytes carry this run's temp
+          # directory: hashing them would move the stamp on a re-run that read
+          # byte-identical evidence, which is the very thing the manifest's
+          # ordinal labels exist to prevent. The notices and the origin map sit
+          # on lines that do not start with `/`, so normalizing costs this lane
+          # nothing it listed the files for.
+          #
           # Then the image bytes, taking ONLY lines that are really files.
           # $SHOTS is NOT a pure path list despite what the evidence script's
           # header says: a `TRUNCATED: more than $MAX_SHOTS images` prose line is
@@ -387,7 +396,7 @@ jobs:
           # covered, so filtering here loses nothing.
           : > "$EVIDENCE_LIST"
           for f in "$SHOTS" "$SHOT_MAP" "$CLIPS"; do
-            [ -r "$f" ] && printf '%s\n' "$f" >> "$EVIDENCE_LIST" || :
+            [ -r "$f" ] && printf 'pathlist:%s\n' "$f" >> "$EVIDENCE_LIST" || :
           done
           if [ -r "$SHOTS" ]; then
             while IFS= read -r p || [ -n "$p" ]; do
@@ -417,13 +426,27 @@ jobs:
           PATCH: ${{ runner.temp }}/authentic.patch
         run: |
           set -uo pipefail
-          git diff --no-color "$BASE_SHA...HEAD" > "$PATCH"
+          # The checkout is the pull request's merge ref, whose FIRST parent is
+          # the base branch tip it was minted against, so diffing from that
+          # parent is exactly what merging this pull request does to the base.
+          # `pull_request.base.sha` is pinned when the pull request opens and
+          # does NOT track the base branch, so diffing from it carries every
+          # commit the base gained since -- on a busy base that is megabytes of
+          # other people's work, which trips the size cap below and hands the
+          # reviewer the base's own history as this change. Falls back to it
+          # only where the checkout is not a merge commit and has no parent to
+          # read the base from.
+          BASE="$BASE_SHA"
+          if git rev-parse -q --verify HEAD^2 >/dev/null; then
+            BASE="$(git rev-parse HEAD^1)"
+          fi
+          git diff --no-color "$BASE...HEAD" > "$PATCH"
           if [ "$(wc -c < "$PATCH" 2>/dev/null || echo 0)" -gt 1000000 ]; then
             echo "::error::diff exceeds 1 MB; failing closed (split the PR)."
             exit 1
           fi
           if [ ! -s "$PATCH" ]; then
-            echo "::error::empty diff for $BASE_SHA...HEAD; failing closed."
+            echo "::error::empty diff for $BASE...HEAD; failing closed."
             exit 1
           fi
           echo "Prefetched the diff ($(wc -c < "$PATCH") bytes) as a data file."

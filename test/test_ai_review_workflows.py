@@ -1777,11 +1777,12 @@ class TestIntentReadFailureFailsClosed:
     """
 
     def _read_block(self, lane: str) -> str:
-        # The read lives in the ONE shared capture both lanes source. Assert the
-        # lane reaches it, then execute the script's own copy.
+        # The read lives in the ONE shared snapshot both lanes reach through the
+        # ONE shared capture they source. Assert the lane reaches it, then
+        # execute the capture's own copy of the block that consumes it.
         assert CAPTURE_SOURCE_LINE in _workflow(lane), lane
         script = CAPTURE_SCRIPT.read_text(encoding="utf-8")
-        start = script.index('raw=""')
+        start = script.index('. "${KC_SCRIPT_DIR:')
         end = script.index("# Strip embedded media")
         return script[start:end]
 
@@ -1789,8 +1790,11 @@ class TestIntentReadFailureFailsClosed:
         bash = _bash()
         if bash is None:
             pytest.skip("the read block is Bash; skip where Bash is absent")
-        body_file = tmp_path / "api-reply.txt"
-        body_file.write_text("Title: t\n\nDescription:\nprose\n", encoding="utf-8")
+        # The snapshot fetches the WHOLE PR object once and splits the title
+        # and the description out of it, so the stub answers with that object
+        # rather than with the composed text two separate reads returned.
+        body_file = tmp_path / "api-reply.json"
+        body_file.write_text('{"title":"t","body":"prose"}\n', encoding="utf-8")
         attempts = tmp_path / "gh-attempts"
         gh = tmp_path / "gh"
         stub = f'#!/bin/sh\nprintf x >> "{attempts}"\n'
@@ -1827,14 +1831,22 @@ class TestIntentReadFailureFailsClosed:
             env={
                 # tmp_path first so the `gh` stub wins; starve any real gh of
                 # credentials so a stub-resolution failure can never turn into
-                # a live API call.
-                "PATH": f"{tmp_path}{os.pathsep}/usr/local/bin{os.pathsep}/usr/bin{os.pathsep}/bin",
+                # a live API call. `_stub_path` appends the host's real `jq`,
+                # which the read block needs to split the title and body out of
+                # one API response and which the Windows runners' Git Bash does
+                # not put under the Unix defaults -- without it the read fails
+                # closed there and the case reads as a broken lane.
+                "PATH": _stub_path(tmp_path),
                 "GH_TOKEN": "",
                 "GITHUB_TOKEN": "",
                 "LC_ALL": "C",
                 "REPO": "example/repo",
                 "PR": "1",
                 "TMPDIR": str(tmp_path),
+                # This block is executed as `bash -c` text, so $BASH_SOURCE is
+                # empty and the sibling-path source cannot resolve itself. The
+                # real lanes source the capture from a file and need no override.
+                "KC_SCRIPT_DIR": str(CAPTURE_SCRIPT.parent),
             },
             cwd=tmp_path,
         )
@@ -2197,10 +2209,19 @@ DESIGN_EVIDENCE_LANES = ("design-review.yml", "fork-design-review.yml")
 # trusted base checkout, so a fork cannot alter what fetches its evidence.
 ATTACHMENT_SCRIPT = ".github/scripts/pr-attachment-evidence.sh"
 ATTACHMENT_SOURCE_LINE = '. "$GITHUB_WORKSPACE/.github/scripts/pr-attachment-evidence.sh"'
+# The ONE read of the PR's mutable title and description, shared by both
+# consumers in a job. Sourced by sibling path rather than through an env var,
+# so a lane cannot silently opt out of it.
+SNAPSHOT_SCRIPT = ".github/scripts/pr-body-snapshot.sh"
+SNAPSHOT_SOURCE_FRAGMENT = "/pr-body-snapshot.sh"
 
 
 def _attachment_script() -> str:
     return (ROOT / ATTACHMENT_SCRIPT).read_text(encoding="utf-8")
+
+
+def _snapshot_script() -> str:
+    return (ROOT / SNAPSHOT_SCRIPT).read_text(encoding="utf-8")
 
 
 class TestUxReviewReadsTheScreenshotsBlindFirst:
@@ -2442,17 +2463,21 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
 
     @staticmethod
     def _gh_stub() -> str:
-        """A `gh` that answers the one call the step makes -- the PR body --
-        from $GH_STUB_BODY, and fails loudly on anything else, so a step that
-        grew a second gh call would be caught here rather than in CI. The
-        first $GH_STUB_FAIL_FIRST calls fail with exit 1, the way a 5xx or a
-        rate limit would, so the retry around the read can be exercised."""
+        """A `gh` that answers the one call the step makes -- the whole PR
+        object, which pr-body-snapshot.sh reads once per job for the title and
+        the description together -- from $GH_STUB_BODY, and fails loudly on
+        anything else, so a step that grew a second gh call would be caught
+        here rather than in CI. The first $GH_STUB_FAIL_FIRST calls fail with
+        exit 1, the way a 5xx or a rate limit would, so the retry around the
+        read can be exercised."""
         return (
             "gh() {\n"
             '  n=$(cat "$GH_STUB_CALLS" 2>/dev/null || echo 0); n=$((n + 1)); printf \'%s\' "$n" > "$GH_STUB_CALLS"\n'
             '  if [ "$n" -le "${GH_STUB_FAIL_FIRST:-0}" ]; then echo "gh stub: transient failure $n" >&2; return 1; fi\n'
             '  case "$1 $2" in\n'
-            '    "api repos/$REPO/pulls/$PR") printf \'%s\' "$GH_STUB_BODY" ;;\n'
+            '    "api repos/$REPO/pulls/$PR") printf \'{"title":%s,"body":%s}\' '
+            '"$(printf \'%s\' "${GH_STUB_TITLE:-t}" | jq -Rs .)" '
+            '"$(printf \'%s\' "$GH_STUB_BODY" | jq -Rs .)" ;;\n'
             '    *) echo "gh stub: unexpected call: $*" >&2; return 1 ;;\n'
             "  esac\n"
             "}\n"
@@ -2543,6 +2568,16 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
         if bash is None:
             pytest.skip("the evidence step runs only under Bash")
         env = self._git_env(tmp_path)
+        # One CALL of this harness is one job, and several cases below run it
+        # twice to compare two runs of the same lane -- a 404 then a 503 on the
+        # same PR, say. The step reads the description through a snapshot cached
+        # under `$RUNNER_TEMP`, so a temp shared between those two calls would
+        # serve call 2 the body call 1 asked for, and the second case would
+        # silently measure the first one's input.
+        self._job_seq = getattr(self, "_job_seq", 0) + 1
+        job_temp = tmp_path / f"job-temp-{self._job_seq}"
+        job_temp.mkdir(parents=True, exist_ok=True)
+        env["RUNNER_TEMP"] = str(job_temp)
         # bash -c is a non-interactive shell, so it sources $BASH_ENV before
         # the script: the functions defined there shadow every gh and curl on
         # PATH, wherever the platform's bash put them. gh() serves the body
@@ -2636,12 +2671,28 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
         `GIT_*` location variable is dropped. Global and system config are
         pointed away too, so a host-wide `commit.gpgsign` or hook path cannot
         reach the fixture.
+
+        `RUNNER_TEMP` is given its own per-case directory for the same reason,
+        and it matters as soon as a step under test keeps anything there. The
+        evidence step reads the PR description through pr-body-snapshot.sh,
+        which caches that read under `$RUNNER_TEMP` BECAUSE a job is exactly
+        the scope one read should serve. On a GitHub runner that variable is
+        set job-wide, so inheriting it makes every case in the shard share one
+        cache: the first case to run leaves a snapshot for `example/repo#7`,
+        and every later case reuses it instead of calling its own `gh` stub --
+        its call counter is never written, and a case that asks the stub to
+        fail sees the step succeed. The failure is invisible off-runner, where
+        `RUNNER_TEMP` is unset and each case falls back to a fresh `mktemp -d`.
+        One case is one job, so one case gets one job temp.
         """
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         gitconfig = tmp_path / "gitconfig"
         gitconfig.touch()
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
         env["GIT_CONFIG_NOSYSTEM"] = "1"
+        runner_temp = tmp_path / "runner-temp"
+        runner_temp.mkdir(parents=True, exist_ok=True)
+        env["RUNNER_TEMP"] = str(runner_temp)
         return env
 
     def _git(self, repo: Path, *args: str) -> str:
@@ -2654,6 +2705,30 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
             cwd=repo,
             env=self._git_env(repo.parent),
         ).stdout.strip()
+
+    def test_each_case_gets_its_own_job_temp_not_the_shard_s(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One case is one job, so the harness must not hand two cases the same
+        `$RUNNER_TEMP`.
+
+        The evidence step reads the PR description through a snapshot cached
+        under `$RUNNER_TEMP`, which is the right scope on a runner and the wrong
+        one here: a runner sets that variable job-wide, so an inherited value
+        lets case 1's snapshot answer for case 2, whose `gh` stub is then never
+        called. That is silent off-runner, where the variable is unset, which is
+        why it is pinned rather than left to the next reader to notice.
+        """
+        monkeypatch.setenv("RUNNER_TEMP", "/the/whole/shard/temp")
+        seen: list[str] = []
+        for case in ("case-one", "case-two"):
+            (tmp_path / case).mkdir()
+            got = self._git_env(tmp_path / case)["RUNNER_TEMP"]
+            assert got != "/the/whole/shard/temp", "the harness inherited the shard's job temp"
+            assert Path(got).is_dir(), got
+            assert Path(got).parent == tmp_path / case, got
+            seen.append(got)
+        assert seen[0] != seen[1], "two cases were handed one job temp"
 
     def test_the_evidence_step_copies_regular_images_under_opaque_names(
         self, tmp_path: Path
@@ -3267,7 +3342,10 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
             gh_fail_first=2,
         )
         assert self._gh_calls == 3, self._evidence_stdout
-        assert self._evidence_stdout.count("Reading the PR description failed on attempt") == 2
+        assert (
+            self._evidence_stdout.count("Reading the PR title and description failed on attempt")
+            == 2
+        )
         assert [p.name for p in blind_dir.iterdir()] == [
             "shot-01.png" if lane == "ux-review.yml" else "attachment-01.png"
         ]
@@ -3434,12 +3512,19 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
         script = _attachment_script()
         code = [ln for ln in script.splitlines() if not ln.lstrip().startswith("#")]
         assert any(
-            ln.strip() == 'if body="$(gh api "repos/$REPO/pulls/$PR" --jq \'.body // ""\')"; then'
-            for ln in code
-        ), "the shared script reads the description from the API into one variable"
+            SNAPSHOT_SOURCE_FRAGMENT in ln for ln in code
+        ), "the shared script takes the description from this job's one snapshot read"
+        assert any(
+            ln.strip() == 'body="$(cat "$KC_PR_BODY_FILE")"' for ln in code
+        ), "and reads it into one variable, as before"
+        assert not [ln for ln in code if "gh api" in ln], [ln for ln in code if "gh api" in ln]
         # A transient API failure is retried, bounded, and then fails closed.
-        assert "for attempt in 1 2 3; do" in script
-        assert 'sleep "$attempt"' in script
+        # The retry lives in the snapshot, the only reader now; the fail-closed
+        # MESSAGE stays here, because a failed read costs each consumer
+        # something different.
+        snapshot = _snapshot_script()
+        assert "for _kc_snap_try in 1 2 3; do" in snapshot
+        assert 'sleep "$_kc_snap_try"' in snapshot
         assert "::error::Could not read this PR's description after 3 attempts" in script
         body_lines = [ln for ln in code if "$body" in ln or "${body" in ln]
         assert len(body_lines) == 1, body_lines
@@ -3474,12 +3559,19 @@ class TestUxReviewReadsTheScreenshotsBlindFirst:
         code = [ln for ln in script.splitlines() if not ln.lstrip().startswith("#")]
         body_lines = [ln for ln in code if "$body" in ln or "${body" in ln]
         assert any(
-            ln.strip() == 'if body="$(gh api "repos/$REPO/pulls/$PR" --jq \'.body // ""\')"; then'
-            for ln in code
-        ), "the shared script reads the description from the API into one variable"
+            SNAPSHOT_SOURCE_FRAGMENT in ln for ln in code
+        ), "the shared script takes the description from this job's one snapshot read"
+        assert any(
+            ln.strip() == 'body="$(cat "$KC_PR_BODY_FILE")"' for ln in code
+        ), "and reads it into one variable, as before"
+        assert not [ln for ln in code if "gh api" in ln], [ln for ln in code if "gh api" in ln]
         # A transient API failure is retried, bounded, and then fails closed.
-        assert "for attempt in 1 2 3; do" in script
-        assert 'sleep "$attempt"' in script
+        # The retry lives in the snapshot, the only reader now; the fail-closed
+        # MESSAGE stays here, because a failed read costs each consumer
+        # something different.
+        snapshot = _snapshot_script()
+        assert "for _kc_snap_try in 1 2 3; do" in snapshot
+        assert 'sleep "$_kc_snap_try"' in snapshot
         assert "::error::Could not read this PR's description after 3 attempts" in script
         assert len(body_lines) == 1, body_lines
         assert (
@@ -15269,6 +15361,277 @@ def _stamp_block(name: str) -> list[str]:
     raise AssertionError(f"{name}: the stamp gate is never closed")
 
 
+class TestBothBodyReadersShareOneRead:
+    """The two readers of the PR's mutable text read it ONCE per job.
+
+    Two independent fetches, in adjacent steps of one job, are the hazard:
+    pr-attachment-evidence.sh collects the description's attachments and
+    pr-description-capture.sh captures its prose. A description edited between
+    two such reads pairs the OLD attachments with the NEW prose, and the
+    manifest digest the lane publishes is taken over that pair -- a composite
+    revision that never existed, which a reader recomputing it reads as a match.
+    Nothing corrects it afterwards either, because the lanes fire on
+    `opened, synchronize, reopened` and a description edit starts no run.
+
+    The window was ordinary rather than adversarial: pushing a commit starts the
+    run, and pasting a screenshot or rewording the body in the next minute lands
+    inside it.
+
+    pr-body-snapshot.sh holds one fetch of both fields for the whole job. These
+    cases pin that structurally -- neither consumer calls the API itself -- and
+    then EXECUTE both consumers over a body that changes between them, which is
+    the only way to show the two halves name one revision.
+    """
+
+    def _job(self, tmp_path: Path) -> dict[str, str]:
+        """A fake `gh` that counts calls and serves the body live off disk.
+
+        Reading the body from a file on every call is what lets a case edit it
+        BETWEEN the two consumers, which is the defect's exact shape.
+        """
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        gh = bin_dir / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'echo call >> "$GH_CALLS"\n'
+            'printf \'{"title":%s,"body":%s}\\n\' '
+            '"$(jq -Rs . < "$GH_TITLE")" "$(jq -Rs . < "$GH_BODY")"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        gh.chmod(0o755)
+        (tmp_path / "title.in").write_text("the title", encoding="utf-8", newline="")
+        (tmp_path / "calls").write_text("", encoding="utf-8")
+        runner_temp = tmp_path / "runner-temp"
+        runner_temp.mkdir(exist_ok=True)
+        return _child_env(
+            {
+                # bin_dir first so the stub wins; _stub_path resolves the host's
+                # real jq, which the Windows shards do not have on the defaults.
+                "PATH": os.pathsep.join([str(bin_dir), _stub_path(tmp_path)]),
+                "GH_CALLS": str(tmp_path / "calls"),
+                "GH_TITLE": str(tmp_path / "title.in"),
+                "GH_BODY": str(tmp_path / "body.in"),
+                "REPO": "o/r",
+                "PR": "1",
+                "GH_TOKEN": "t",
+                # The snapshot is keyed to the JOB, and this is what makes two
+                # separate consumer processes one job.
+                "RUNNER_TEMP": str(runner_temp),
+                "TMPDIR": str(tmp_path),
+                "TEMP": str(tmp_path),
+                "TMP": str(tmp_path),
+            }
+        )
+
+    def _source(
+        self, script: Path, tmp_path: Path, env: dict[str, str], extra: dict[str, str]
+    ) -> "subprocess.CompletedProcess[str]":
+        bash = _bash()
+        if bash is None:
+            pytest.skip("the readers are Bash; skip where Bash is absent")
+        runner = tmp_path / f"run-{script.stem}.sh"
+        runner.write_text(f'. "{script}"\n', encoding="utf-8", newline="\n")
+        return subprocess.run(
+            [bash, str(runner)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=120,
+            env={**env, **extra},
+            cwd=tmp_path,
+        )
+
+    def _collect_evidence(
+        self, tmp_path: Path, env: dict[str, str]
+    ) -> "subprocess.CompletedProcess[str]":
+        """Run the attachment reader. Its downloads are not under test here, so
+        curl answers a definite 4xx; the READ is what these cases measure."""
+        curl = Path(env["PATH"].split(os.pathsep)[0]) / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\nprintf 404\nexit 22\n", encoding="utf-8", newline="\n"
+        )
+        curl.chmod(0o755)
+        for name in ("shots", "map", "clips"):
+            (tmp_path / name).write_text("", encoding="utf-8")
+        return self._source(
+            ROOT / ATTACHMENT_SCRIPT,
+            tmp_path,
+            env,
+            {
+                "FETCH_DIR": str(tmp_path / "fetch"),
+                "DEST_DIR": str(tmp_path / "dest"),
+                "NAME_STEM": "shot",
+                "SHOTS": str(tmp_path / "shots"),
+                "SHOT_MAP": str(tmp_path / "map"),
+                "CLIPS": str(tmp_path / "clips"),
+                "MAX_SHOTS": "40",
+                "MAX_CLIPS": "4",
+            },
+        )
+
+    def _capture_prose(
+        self, tmp_path: Path, env: dict[str, str], intent: Path
+    ) -> "subprocess.CompletedProcess[str]":
+        return self._source(CAPTURE_SCRIPT, tmp_path, env, {"INTENT": str(intent)})
+
+    def _calls(self, tmp_path: Path) -> int:
+        return len((tmp_path / "calls").read_text(encoding="utf-8").split())
+
+    def test_neither_reader_calls_the_api_itself(self) -> None:
+        """Structural half: the snapshot is the ONLY place either reader's API
+        call can live, so a lane cannot acquire a second read by accident."""
+        for script in (_attachment_script(), CAPTURE_SCRIPT.read_text(encoding="utf-8")):
+            code = [ln for ln in script.splitlines() if not ln.lstrip().startswith("#")]
+            assert not [ln for ln in code if "gh api" in ln], [ln for ln in code if "gh api" in ln]
+            assert any(SNAPSHOT_SOURCE_FRAGMENT in ln for ln in code), script[:400]
+        snapshot = _snapshot_script()
+        reads = [
+            ln for ln in snapshot.splitlines() if not ln.lstrip().startswith("#") and "gh api" in ln
+        ]
+        assert len(reads) == 1, reads
+        assert 'gh api "repos/$REPO/pulls/$PR"' in reads[0], reads[0]
+        # Both fields come out of that ONE response. Two `--jq` reads would be
+        # two revisions again, however adjacent the calls.
+        assert "jq -r '.title'" in snapshot
+        assert "jq -r '.body // \"\"'" in snapshot
+
+    def test_two_consumers_in_one_job_spend_one_api_read(self, tmp_path: Path) -> None:
+        env = self._job(tmp_path)
+        (tmp_path / "body.in").write_text("prose\n", encoding="utf-8", newline="\n")
+        evidence = self._collect_evidence(tmp_path, env)
+        assert evidence.returncode == 0, _proc_log(evidence)
+        assert self._calls(tmp_path) == 1, self._calls(tmp_path)
+        capture = self._capture_prose(tmp_path, env, tmp_path / "pr-intent.txt")
+        assert capture.returncode == 0, _proc_log(capture)
+        assert (
+            self._calls(tmp_path) == 1
+        ), f"the second consumer read the API again: {self._calls(tmp_path)} calls"
+        assert "no second API read" in capture.stdout, capture.stdout
+
+    def test_a_host_without_jq_fails_closed_instead_of_reading_twice(self, tmp_path: Path) -> None:
+        """Splitting one response needs a standalone `jq`, so a host without one
+        has to say so rather than quietly fall back.
+
+        The fallback that is NOT allowed is the defect: two `gh api --jq` reads
+        are two revisions however adjacent they are. A reader with no title and
+        no body is a visible failure the lane reports; a reader with a matching
+        pair drawn from two revisions is not. The review lanes run on
+        ubuntu-latest, where `jq` is present; the case that meets this branch in
+        practice is a Windows test shard, whose Git Bash keeps `jq` outside the
+        Unix default directories -- which is why every harness here resolves the
+        host's real `jq` onto the child PATH instead of assuming `/usr/bin`.
+        """
+        env = self._job(tmp_path)
+        (tmp_path / "body.in").write_text("prose\n", encoding="utf-8", newline="\n")
+        # Keep the `gh` stub reachable and drop everything else: the point is
+        # that a read is NOT attempted, so the stub must be able to record one.
+        env["PATH"] = env["PATH"].split(os.pathsep)[0]
+        out = self._source(ROOT / SNAPSHOT_SCRIPT, tmp_path, env, {})
+        assert "::error::jq is not available" in out.stdout, _proc_log(out)
+        assert self._calls(tmp_path) == 0, "it read the API before checking it could split it"
+        assert "no second API read" not in out.stdout, out.stdout
+
+    def test_an_edit_between_the_two_consumers_cannot_split_them(self, tmp_path: Path) -> None:
+        """The defect itself. The author edits the description after the
+        evidence step and before the capture step; the capture must still see
+        the revision the evidence was collected from, so the digest names one
+        revision rather than a composite of two."""
+        env = self._job(tmp_path)
+        body = tmp_path / "body.in"
+        body.write_text("v1 prose\n", encoding="utf-8", newline="\n")
+        assert self._collect_evidence(tmp_path, env).returncode == 0
+        body.write_text("v2 prose, edited mid-job\n", encoding="utf-8", newline="\n")
+        intent = tmp_path / "pr-intent.txt"
+        capture = self._capture_prose(tmp_path, env, intent)
+        assert capture.returncode == 0, _proc_log(capture)
+        captured = intent.read_text(encoding="utf-8")
+        assert "v1 prose" in captured, captured
+        assert "v2 prose" not in captured, captured
+
+    def test_a_later_job_reads_the_edit(self, tmp_path: Path) -> None:
+        """The snapshot is scoped to a job, not cached across them: a re-run
+        after an edit judges the new text, which is what the lanes have always
+        promised. Holding one revision across jobs would freeze the PR."""
+        first = self._job(tmp_path / "job-a")
+        (tmp_path / "job-a" / "body.in").write_text("v1 prose\n", encoding="utf-8", newline="\n")
+        intent_a = tmp_path / "job-a" / "pr-intent.txt"
+        assert self._capture_prose(tmp_path / "job-a", first, intent_a).returncode == 0
+        second = self._job(tmp_path / "job-b")
+        (tmp_path / "job-b" / "body.in").write_text("v2 prose\n", encoding="utf-8", newline="\n")
+        intent_b = tmp_path / "job-b" / "pr-intent.txt"
+        assert self._capture_prose(tmp_path / "job-b", second, intent_b).returncode == 0
+        assert "v1 prose" in intent_a.read_text(encoding="utf-8")
+        assert "v2 prose" in intent_b.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "body",
+        ["plain body", "", "one trailing\n", "two trailing\n\n", "a\ttab and a 'quote'"],
+        ids=["plain", "empty", "one-nl", "two-nl", "punctuation"],
+    )
+    def test_the_captured_bytes_match_the_old_single_read(self, body: str, tmp_path: Path) -> None:
+        """A digest published BEFORE the snapshot must still recompute to the
+        same value, or every stamp already on an open PR silently becomes a
+        mismatch -- which reads as "the description moved", the one thing the
+        stamp exists to report. Command substitution dropped the old `--jq`
+        template's trailing newline and drops `jq -r`'s here, so the composed
+        bytes are unchanged; these cases check that where the two forms could
+        differ, which is a body's trailing newlines.
+        """
+        env = self._job(tmp_path)
+        (tmp_path / "body.in").write_text(body, encoding="utf-8", newline="")
+        intent = tmp_path / "pr-intent.txt"
+        assert self._capture_prose(tmp_path, env, intent).returncode == 0
+        old_form = f"Title: the title\n\nDescription:\n{body}".rstrip("\n")
+        # The capture appends one newline of its own when it writes the file.
+        assert intent.read_text(encoding="utf-8").rstrip("\n") == old_form, (
+            intent.read_text(encoding="utf-8"),
+            old_form,
+        )
+
+    def test_a_read_that_never_succeeds_fails_each_consumer_closed(self, tmp_path: Path) -> None:
+        """Each consumer keeps its OWN fail-closed message, because what a
+        failed read costs is different: one lane collects no evidence, the
+        other judges a PR that appears to state no intent."""
+        for job, runner, needle in (
+            ("job-1", "evidence", "attachment evidence cannot be collected"),
+            ("job-2", "capture", "appears to state no intent"),
+        ):
+            here = tmp_path / job
+            env = self._job(here)
+            (here / "body.in").write_text("prose\n", encoding="utf-8", newline="\n")
+            dead = Path(env["PATH"].split(os.pathsep)[0]) / "gh"
+            dead.write_text(
+                '#!/usr/bin/env bash\necho call >> "$GH_CALLS"\nexit 1\n',
+                encoding="utf-8",
+                newline="\n",
+            )
+            dead.chmod(0o755)
+            if runner == "evidence":
+                result = self._collect_evidence(here, env)
+            else:
+                result = self._capture_prose(here, env, here / "intent.txt")
+            assert result.returncode != 0, _proc_log(result)
+            assert needle in result.stdout, result.stdout
+            # Three attempts, then closed -- the bound the snapshot owns now.
+            assert self._calls(here) == 3, self._calls(here)
+
+    def test_a_snapshot_of_another_pull_request_is_not_reused(self, tmp_path: Path) -> None:
+        """A job serves one PR, so this cannot differ in practice. It is pinned
+        because a snapshot that silently answered for another PR would be this
+        same corruption one level up."""
+        env = self._job(tmp_path)
+        (tmp_path / "body.in").write_text("pr-1 prose\n", encoding="utf-8", newline="\n")
+        assert self._capture_prose(tmp_path, env, tmp_path / "a.txt").returncode == 0
+        first = self._calls(tmp_path)
+        (tmp_path / "body.in").write_text("pr-2 prose\n", encoding="utf-8", newline="\n")
+        assert self._capture_prose(tmp_path, {**env, "PR": "2"}, tmp_path / "b.txt").returncode == 0
+        assert self._calls(tmp_path) == first + 1, (first, self._calls(tmp_path))
+        assert "pr-2 prose" in (tmp_path / "b.txt").read_text(encoding="utf-8")
+
+
 class TestNoLaneGrantsALiveDescriptionRead:
     """No `--allowedTools` line anywhere grants a live description fetch.
 
@@ -15347,13 +15710,36 @@ class TestNoLaneGrantsALiveDescriptionRead:
             if "authentic.patch" not in workflow:
                 continue
             checked += 1
-            assert 'git diff --no-color "$BASE_SHA' in workflow, name
+            assert 'git diff --no-color "$BASE' in workflow, name
             assert "failing closed" in workflow, name
             if "exceeds 1 MB" in workflow:
                 capped += 1
                 assert "1000000" in workflow, name
         assert checked >= 6, checked
         assert capped >= 5, capped
+
+    @pytest.mark.parametrize("name", ("design-review.yml", "ux-review.yml"))
+    def test_a_capped_lane_measures_this_change_not_the_base_branch(self, name: str) -> None:
+        """A size cap must be measured against the merge ref's own first parent.
+
+        `github.event.pull_request.base.sha` is fixed when the pull request
+        opens and does not track the base branch, while the checkout is a merge
+        ref minted at push time. Diffing one against the other counts every
+        commit the base gained in between, so on a busy base the cap fires on
+        other people's work and the reviewer reads the base's history as the
+        change under review. The first parent of the merge ref IS the base tip
+        it was minted against, which makes the diff the change itself.
+
+        Pinned on the two lanes that carry both a cap and a merge-ref checkout.
+        The fork lanes take the same shape from their own trigger and are not
+        this case's subject.
+        """
+        workflow = _workflow(name)
+        assert 'BASE="$BASE_SHA"' in workflow, name
+        assert "git rev-parse -q --verify HEAD^2" in workflow, name
+        assert 'BASE="$(git rev-parse HEAD^1)"' in workflow, name
+        assert 'git diff --no-color "$BASE...HEAD"' in workflow, name
+        assert 'git diff --no-color "$BASE_SHA...HEAD"' not in workflow, name
 
 
 class TestStampFollowsTheSharedCapture:
@@ -15382,20 +15768,33 @@ class TestStampFollowsTheSharedCapture:
         Two implementations would make one digest mean two different things, so a
         reader recomputing it could get a mismatch from a description nobody had
         touched. The distinctive lines of the capture therefore appear in the
-        script and in no workflow.
+        script and in no workflow -- and the READ's distinctive line lives one
+        level further down still, in the snapshot both body readers share, which
+        is what keeps the evidence half and the prose half on one revision.
         """
-        script = CAPTURE_SCRIPT.read_text(encoding="utf-8")
-        needles = (
-            'raw="$(gh api "repos/$REPO/pulls/$PR"',
-            "[description TRUNCATED at 8000 bytes]",
-            'INTENT_DIGEST="$($_kc_sha',
-        )
-        for needle in needles:
-            assert needle in script, needle
+        owners = {
+            CAPTURE_SCRIPT.read_text(encoding="utf-8"): (
+                "[description TRUNCATED at 8000 bytes]",
+                'INTENT_DIGEST="$($_kc_sha',
+            ),
+            _snapshot_script(): (
+                # Named by the variables the values land in, because the bare
+                # forms are not distinctive: `ai-review-human-override.yml`
+                # reads the same endpoint for `head.sha`, and
+                # `deferred-findings-audit.yml` runs the same jq filter over an
+                # issue. Neither is a description read and neither is a copy.
+                '_kc_snap_json="$(gh api "repos/$REPO/pulls/$PR")"',
+                'jq -r \'.body // ""\' > "$KC_PR_BODY_FILE"',
+            ),
+        }
+        for script, needles in owners.items():
+            for needle in needles:
+                assert needle in script, needle
         for name in _every_workflow():
             workflow = _workflow(name)
-            for needle in needles:
-                assert needle not in workflow, (name, needle)
+            for needles in owners.values():
+                for needle in needles:
+                    assert needle not in workflow, (name, needle)
 
 
 class TestStampIsWorkflowWrittenAndGatedOnARealVerdict:
@@ -15572,13 +15971,22 @@ class TestCaptureDigestNamesTheModelsInput:
         evidence: list[bytes] | None = None,
         evidence_names: list[str] | None = None,
         list_missing: bool = False,
+        pathlists: list[tuple[str, bytes]] | None = None,
+        pathlist_missing: bool = False,
     ) -> tuple[str, str, bytes]:
         bash = _bash()
         if bash is None:
             pytest.skip("the capture is Bash; skip where Bash is absent")
         tmp_path.mkdir(parents=True, exist_ok=True)
-        reply = tmp_path / "api-reply.txt"
-        reply.write_text(f"Title: t\n\nDescription:\n{body}\n", encoding="utf-8", newline="\n")
+        # The capture reaches the API through pr-body-snapshot.sh, which fetches
+        # the whole PR object ONCE and splits the title and the description out
+        # of it, so the stub answers with that object. The composed bytes are
+        # identical to what the old single `--jq` template returned, which is
+        # what keeps a digest published before the snapshot reproducible.
+        reply = tmp_path / "api-reply.json"
+        reply.write_text(
+            json.dumps({"title": "t", "body": body}) + "\n", encoding="utf-8", newline="\n"
+        )
         gh = tmp_path / "gh"
         gh.write_text(f'#!/bin/sh\ncat "{reply}"\n', encoding="utf-8", newline="\n")
         gh.chmod(0o755)
@@ -15586,7 +15994,10 @@ class TestCaptureDigestNamesTheModelsInput:
         outputs = tmp_path / "gh-output"
         outputs.write_text("", encoding="utf-8")
         extra: dict[str, str] = {}
-        if evidence is not None or list_missing:
+        wants_list = (
+            evidence is not None or list_missing or pathlists is not None or pathlist_missing
+        )
+        if wants_list:
             # Write the evidence files the lane would have collected, then the
             # list naming them -- the same two-file shape the lanes build, so the
             # pin exercises the real contract rather than a paraphrase of it.
@@ -15597,7 +16008,18 @@ class TestCaptureDigestNamesTheModelsInput:
                 target.write_bytes(blob)
                 paths.append(target)
             listing = tmp_path / "intent-evidence-list.txt"
-            lines = [str(p) for p in paths]
+            # A lane lists the files whose own bytes are per-run paths FIRST and
+            # marks them `pathlist:`, then the evidence whose bytes ARE the
+            # evidence. Same order as the four real lanes, so an ordinal here
+            # means what it means there.
+            lines = []
+            for name, blob in pathlists or []:
+                target = tmp_path / name
+                target.write_bytes(blob)
+                lines.append(f"pathlist:{target}")
+            if pathlist_missing:
+                lines.append(f"pathlist:{tmp_path / 'never-written.txt'}")
+            lines += [str(p) for p in paths]
             if list_missing:
                 lines.append(str(tmp_path / "never-written.bin"))
             listing.write_text("".join(f"{ln}\n" for ln in lines), encoding="utf-8", newline="\n")
@@ -15635,7 +16057,7 @@ class TestCaptureDigestNamesTheModelsInput:
             env=env,
             cwd=tmp_path,
         )
-        if list_missing:
+        if list_missing or pathlist_missing:
             # The fail-closed path is the subject of its own pin, so hand the
             # caller the failure instead of asserting success here.
             return (
@@ -15839,13 +16261,16 @@ class TestCaptureDigestNamesTheModelsInput:
         of its lines that are really files; this pin holds the capture's half of
         that contract by proving a prose-bearing list file is digestible.
         """
-        listing = tmp_path / "shots.txt"
-        listing.parent.mkdir(parents=True, exist_ok=True)
-        listing.write_bytes(
-            b"/nonexistent/shot-01.png\nTRUNCATED: more than 40 images; one was not listed\n"
-        )
         reported, outputs, _ = self._capture(
-            tmp_path, "prose", evidence=[listing.read_bytes()], evidence_names=["shots.txt"]
+            tmp_path,
+            "prose",
+            pathlists=[
+                (
+                    "shots.txt",
+                    b"/nonexistent/shot-01.png\n"
+                    b"TRUNCATED: more than 40 images; one was not listed\n",
+                )
+            ],
         )
         assert len(reported) == 64, reported
         assert f"description_digest={reported}" in outputs, outputs
@@ -15855,20 +16280,133 @@ class TestCaptureDigestNamesTheModelsInput:
         load-bearing: an edit that changes WHICH evidence a cap drops changes that
         list's bytes even when no kept file changed, so the verdict's stamp moves.
         Filtering the notice out and digesting only real paths would lose this.
+
+        Held in the `pathlist:` form, which is what the four lanes list. The
+        notice does not start with `/`, so normalizing to basenames leaves it
+        whole and this property survives that change -- which is the point of
+        pinning it here rather than on the plain form.
         """
+        kept = b"/x/_temp/shots/shot-01.png\n"
         one, _, _ = self._capture(
             tmp_path / "a",
             "same prose",
-            evidence=[b"/x/shot-01.png\nTRUNCATED: more than 40 images; one was not listed\n"],
-            evidence_names=["shots.txt"],
+            pathlists=[
+                ("shots.txt", kept + b"TRUNCATED: more than 40 images; one was not listed\n")
+            ],
         )
         two, _, _ = self._capture(
             tmp_path / "b",
             "same prose",
-            evidence=[b"/x/shot-01.png\nTRUNCATED: more than 40 images; two were not listed\n"],
-            evidence_names=["shots.txt"],
+            pathlists=[
+                ("shots.txt", kept + b"TRUNCATED: more than 40 images; two were not listed\n")
+            ],
         )
         assert one != two, one
+
+    def test_a_marked_lists_temp_root_stays_out_of_the_digest(self, tmp_path: Path) -> None:
+        """The screenshot list holds `"$DEST_DIR/$name"` lines and $DEST_DIR is
+        under `runner.temp`, so digesting its BYTES puts a per-run directory
+        inside the stamp: a re-run that read byte-identical evidence publishes a
+        different digest, and a reader recomputing is told a sound verdict is
+        stale. That is the same defect the manifest's ordinal labels exist to
+        prevent, one level down -- in a listed file's contents rather than in its
+        label. The `pathlist:` form reduces every line starting with `/` to its
+        basename, so the same evidence under two temp roots hashes the same.
+
+        The two renderings are asserted DIFFERENT first. Without that the pin
+        would also pass on a harness that fed identical bytes twice, which is how
+        an invariance test passes while measuring nothing.
+        """
+        one_bytes = b"/home/runner/work/_temp/ux-shots/shot-01.png\n"
+        two_bytes = b"/mnt/other/_work/_temp/ux-shots/shot-01.png\n"
+        assert one_bytes != two_bytes
+        one, _, _ = self._capture(
+            tmp_path / "a", "same prose", pathlists=[("shots.txt", one_bytes)]
+        )
+        two, _, _ = self._capture(
+            tmp_path / "b", "same prose", pathlists=[("shots.txt", two_bytes)]
+        )
+        assert one == two, (one, two)
+
+    def test_a_marked_map_still_moves_when_an_attachment_is_swapped(self, tmp_path: Path) -> None:
+        """Normalizing must drop the directory and nothing else. The origin map is
+        `<opaque name>\\t<origin>` and does not start with `/`, so it survives
+        whole -- which is what keeps a swapped attachment nameable. The strip
+        replaces both URLs with the same placeholder, so the captured prose is
+        byte-identical across this edit and the map is the only thing that moves.
+        Had normalizing reduced the map too, the swap would go unstamped.
+        """
+        one, _, _ = self._capture(
+            tmp_path / "a",
+            "same prose",
+            pathlists=[("map.txt", b"shot-01.png\thttps://example.com/one.png\n")],
+        )
+        two, _, _ = self._capture(
+            tmp_path / "b",
+            "same prose",
+            pathlists=[("map.txt", b"shot-01.png\thttps://example.com/two.png\n")],
+        )
+        assert one != two, one
+
+    def test_an_unreadable_marked_list_file_still_fails_closed(self, tmp_path: Path) -> None:
+        """The marker changes HOW a listed file is folded in, never WHETHER it has
+        to be readable. A stamp that quietly skipped a marked file it could not
+        open would overstate its coverage exactly as the plain form would.
+        """
+        code, outputs, stderr = self._capture(tmp_path, "prose", pathlist_missing=True)
+        assert code != "0", (code, stderr)
+        assert "description_digest=" not in outputs, outputs
+
+    def test_every_lane_marks_the_path_lists_it_hands_over(self) -> None:
+        """Enumerated from source, because a named site is a sample. Two shapes
+        carry absolute paths in their own bytes: the screenshot list a UX lane
+        hands over directly, and the rendered-evidence manifest a design lane
+        hands over, which embeds that list with `cat`. Each must be listed
+        `pathlist:` or this run's temp directory enters the stamp.
+
+        The converse is pinned in the same pass: a line appending ONE image must
+        NOT be marked. Those bytes are the evidence, and normalizing a PNG would
+        hash a reading of its lines instead of its content.
+        """
+        source_line = '. "$GITHUB_WORKSPACE/.github/scripts/pr-description-capture.sh"'
+        marker = "printf 'pathlist:%s\\n'"
+        offenders = []
+        covered = 0
+        for name in _every_workflow():
+            text = _workflow(name)
+            if "EVIDENCE_LIST" not in text or source_line not in text:
+                continue
+            doc = yaml.safe_load(text)
+            for job_id, job in doc["jobs"].items():
+                for step in job.get("steps") or []:
+                    run = step.get("run") or ""
+                    if source_line not in run or "EVIDENCE_LIST" not in run:
+                        continue
+                    covered += 1
+                    appends = 0
+                    for line in run.splitlines():
+                        stripped = line.strip()
+                        if not stripped.endswith('>> "$EVIDENCE_LIST" || :'):
+                            continue
+                        appends += 1
+                        marked = marker in stripped
+                        # `"$f"` is the UX loop over its three list files;
+                        # `"$DESIGN_EVIDENCE"` is the design lanes' manifest.
+                        # Anything else appending to the list is one file whose
+                        # bytes are the evidence.
+                        a_path_list = '"$f"' in stripped or '"$DESIGN_EVIDENCE"' in stripped
+                        if a_path_list and not marked:
+                            offenders.append((name, job_id, "path list unmarked", stripped))
+                        if marked and not a_path_list:
+                            offenders.append((name, job_id, "byte evidence marked", stripped))
+                    if appends == 0:
+                        offenders.append((name, job_id, "no append line found", ""))
+        # Control: exactly four lanes hand evidence to the capture -- two UX and
+        # two design. The two first-principles lanes read prose plus the diff and
+        # set no EVIDENCE_LIST, so a count other than four means this walk stopped
+        # matching the lanes rather than that they are clean.
+        assert covered == 4, covered
+        assert offenders == [], offenders
 
     def test_every_ux_lane_covers_its_recording_list(self) -> None:
         """The recording list is named in each UX lane's prompt as a data file the

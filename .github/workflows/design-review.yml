@@ -238,8 +238,17 @@ jobs:
           # the honest claim. The script fails closed on a file listed here that
           # it cannot read, so a manifest that vanishes mid-job cannot be
           # silently dropped from the stamp's coverage.
+          #
+          # Listed as `pathlist:`, which digests the manifest's content with
+          # every line that starts with `/` reduced to its basename. The manifest
+          # embeds $SHOTS with `cat`, and $SHOTS holds "$DEST_DIR/$name" lines,
+          # so hashing its raw bytes would put this run's temp directory in the
+          # stamp and move it on a re-run that read byte-identical evidence. The
+          # counts, the headings and each recording's repository path do not
+          # start with `/`, so normalizing costs the stamp nothing the manifest
+          # is the predicate for.
           : > "$EVIDENCE_LIST"
-          [ -r "$DESIGN_EVIDENCE" ] && printf '%s\n' "$DESIGN_EVIDENCE" >> "$EVIDENCE_LIST" || :
+          [ -r "$DESIGN_EVIDENCE" ] && printf 'pathlist:%s\n' "$DESIGN_EVIDENCE" >> "$EVIDENCE_LIST" || :
           . "$GITHUB_WORKSPACE/.github/scripts/pr-description-capture.sh"
 
       # Prefetch the diff as a DATA file, so the model needs no Bash at all.
@@ -272,13 +281,27 @@ jobs:
           PATCH: ${{ runner.temp }}/authentic.patch
         run: |
           set -uo pipefail
-          git diff --no-color "$BASE_SHA...HEAD" > "$PATCH"
+          # The checkout is the pull request's merge ref, whose FIRST parent is
+          # the base branch tip it was minted against, so diffing from that
+          # parent is exactly what merging this pull request does to the base.
+          # `pull_request.base.sha` is pinned when the pull request opens and
+          # does NOT track the base branch, so diffing from it carries every
+          # commit the base gained since -- on a busy base that is megabytes of
+          # other people's work, which trips the size cap below and hands the
+          # reviewer the base's own history as this change. Falls back to it
+          # only where the checkout is not a merge commit and has no parent to
+          # read the base from.
+          BASE="$BASE_SHA"
+          if git rev-parse -q --verify HEAD^2 >/dev/null; then
+            BASE="$(git rev-parse HEAD^1)"
+          fi
+          git diff --no-color "$BASE...HEAD" > "$PATCH"
           if [ "$(wc -c < "$PATCH" 2>/dev/null || echo 0)" -gt 1000000 ]; then
             echo "::error::diff exceeds 1 MB; failing closed (split the PR)."
             exit 1
           fi
           if [ ! -s "$PATCH" ]; then
-            echo "::error::empty diff for $BASE_SHA...HEAD; failing closed."
+            echo "::error::empty diff for $BASE...HEAD; failing closed."
             exit 1
           fi
           echo "Prefetched the diff ($(wc -c < "$PATCH") bytes) as a data file."

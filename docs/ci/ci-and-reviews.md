@@ -1431,7 +1431,52 @@ prompt points the model at that file and at nowhere else.
 It is one script rather than a copy per lane because each lane stamps the digest of
 those bytes into its published verdict, under a `### Description read` heading:
 
-    [DESCRIPTION-READ] <sha256 of pr-intent.txt>
+    [DESCRIPTION-READ] <sha256>
+
+What that digest is taken over depends on whether the lane's verdict reads anything
+besides the prose, and the heading says which:
+
+| lanes | the stamp is | why |
+|---|---|---|
+| `first-principles-review` and its fork twin | `sha256` of `pr-intent.txt` | the verdict reads the prose and the diff, and the diff is pinned to a commit so it cannot move underneath it |
+| `design-review`, `ux-review` and their fork twins | `sha256` of a **manifest** naming `pr-intent.txt` and each evidence file the lane's model is pointed at | the media strip replaces every attachment URL with the same placeholder, so swapping one attachment for another leaves the prose byte-identical while the reviewer sees different evidence |
+
+The manifest is one `<label> <sha256>` line per input, newline-terminated, in the
+order the lane listed them -- `description`, then `evidence-1`, `evidence-2` and so
+on -- so the composition is reproducible by hand and two evidence files cannot be
+confused for one longer one. An evidence file whose own bytes are per-run paths is
+folded in by its normalized content instead: every line starting with `/` reduced to
+its basename, every other line verbatim. That is what makes the manifest reproducible
+off the runner at all, since the screenshot list and the rendered-evidence manifest
+that embeds it are written as absolute temp paths.
+
+The heading states the evidence count, so a reader knows which of the two forms to
+recompute before concluding anything from a mismatch. The recipe at the top of
+`pr-description-capture.sh` reproduces the `pr-intent.txt` form; against a lane with
+a non-zero count it mismatches by construction rather than because the description
+moved.
+
+#### One read per job
+
+The four lanes that stamp a manifest read that description twice: once in the
+evidence step, through `.github/scripts/pr-attachment-evidence.sh`, and once in
+the capture step. While each script fetched the API itself, a description edited
+between the two steps paired the OLD attachments with the NEW prose, and the
+manifest digest was taken over that pair -- a revision that never existed,
+reported to a reader recomputing it as a match. No later run corrected it,
+because the lanes fire on `opened, synchronize, reopened` and a description edit
+starts none. The window was ordinary: pushing a commit starts the run, and
+pasting a screenshot in the next minute lands inside it.
+
+`.github/scripts/pr-body-snapshot.sh` is now the only place either script reaches
+the API. It fetches the whole pull request once, splits the title and the body out
+of that one response, and caches them under `$RUNNER_TEMP`; whichever consumer
+runs first pays the read and the other reads those same bytes. Keying the cache to
+`$RUNNER_TEMP` makes "one read per job" the default rather than something a lane
+has to opt into, so a lane added later inherits it without wiring. A *later* job
+still reads afresh, which is what keeps a re-run after an edit judging the new
+text. The composed bytes are unchanged from the two-read form, so a digest
+published before this existed still recomputes to the same value.
 
 Two implementations of the media strip or the 8000-byte cap would make the same
 digest mean two different things, and a reader recomputing it would get a mismatch
