@@ -1457,6 +1457,134 @@ async def test_repo_owner_name_https():
     assert result == "kirodotdev/KiroCrew"
 
 
+async def _owner_name_for(remote_url):
+    import kiro_crew.apps.builtins.dev_fleet.server as mod
+
+    fleet_state_mod._OWNER_REPO = None
+    with patch.object(repository_mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"), \
+         patch.object(repository_mod, "_run_gated_git_soft", new_callable=AsyncMock,
+                      return_value=(0, remote_url, "")):
+        return await mod._repo_owner_name()
+
+
+@pytest.mark.asyncio
+async def test_repo_owner_name_drops_a_query_or_fragment_credential():
+    # This name is passed to `gh --repo` in _pr_query_one, so it lands in a child
+    # process's argv where any local reader sees it, and _get_owner_repo memoizes
+    # it with no expiry -- the exposure then repeats on every refresh with nothing
+    # that undoes it. Neither component may survive the derivation.
+    secret = "ghp_SECRETTOKEN0123456789"
+    for url in (
+        f"https://github.com/o/r.git?access_token={secret}\n",
+        f"https://github.com/o/r?access_token={secret}\n",
+        f"https://github.com/o/r.git#{secret}\n",
+        f"ssh://git@github.com/o/r.git?access_token={secret}\n",
+        f"git@github.com:o/r.git?access_token={secret}\n",
+    ):
+        got = await _owner_name_for(url)
+        assert got is not None, url
+        assert secret not in got, url
+        # The `$`-anchored suffix strip only reaches `.git` once the query is
+        # already gone, so cutting afterwards would leave `r.git` here.
+        assert got == "o/r", url
+
+
+@pytest.mark.asyncio
+async def test_repo_owner_name_leaves_a_clean_remote_unchanged():
+    # Control for the cut: it must not alter a legitimate remote.
+    assert await _owner_name_for("https://github.com/kirodotdev/KiroCrew.git\n") == "kirodotdev/KiroCrew"
+    assert await _owner_name_for("https://ghe.corp.example/team/repo\n") == "team/repo"
+    assert await _owner_name_for("git@github.com:o/r\n") == "o/r"
+    assert await _owner_name_for("https://github.com/o/my.repo-2_x.git\n") == "o/my.repo-2_x"
+
+
+@pytest.mark.asyncio
+async def test_repo_owner_name_refuses_a_name_the_forge_would_not_accept():
+    # The cut closes the reachable leak; this refuses anything else a remote
+    # URL's path could put into argv rather than enumerating what that might be.
+    assert await _owner_name_for("https://github.com/o/r -x=y\n") is None
+    assert await _owner_name_for("https://github.com/o/--upload-pack=sh\n") is None
+    assert await _owner_name_for("https://github.com/o/r$(id)\n") is None
+
+
+# --- the third derivation site: _normalize_repo_identity (fallback repo list) ---
+#
+# `_load_fallback_repos` publishes `identity[1]` into `_FALLBACK_REPOS`, which
+# `fleet_state._pr_statuses_for` hands to `gh --repo` in child argv, and that list
+# is rebuilt only when the configured checkout changes -- so a credential retained
+# here is re-exposed on every refresh with nothing that undoes it.
+
+
+def test_normalize_repo_identity_drops_a_query_or_fragment_credential():
+    secret = "ghp_SECRETTOKEN0123456789"
+    for url in (
+        f"https://github.com/o/r.git?access_token={secret}",
+        f"https://github.com/o/r?access_token={secret}",
+        f"https://github.com/o/r.git#{secret}",
+        f"ssh://git@github.com/o/r.git?access_token={secret}",
+        f"git@github.com:o/r.git?access_token={secret}",
+        f"https://user:{secret}@github.com/o/r.git",
+    ):
+        got = repository_mod._normalize_repo_identity(url)
+        assert got is not None, url
+        assert secret.lower() not in got[1], url
+        assert secret.lower() not in got[0], url
+        # `_REPO_PATH_RE` anchors on `$`, so it cannot strip `.git` while a query
+        # follows: cutting afterwards would leave `o/r.git` here, and that is also
+        # what defeats the caller's basename-equality skip.
+        assert got == ("github.com", "o/r"), url
+
+
+def test_normalize_repo_identity_leaves_a_clean_remote_unchanged():
+    # Control for the cut: two spellings of one repo must still collapse equal,
+    # which is this function's whole job.
+    n = repository_mod._normalize_repo_identity
+    assert n("https://github.com/owner/Repo.git") == ("github.com", "owner/repo")
+    assert n("git@github.com:owner/repo") == ("github.com", "owner/repo")
+    assert n("https://github.com/owner/Repo.git") == n("git@github.com:owner/repo")
+    assert n("https://gitlab.com/g/p.git") == ("gitlab.com", "g/p")
+    assert n("ssh://git@github.com:22/o/r.git") == ("github.com", "o/r")
+    assert n("https://github.com/o/my.repo-2_x.git") == ("github.com", "o/my.repo-2_x")
+
+
+def test_normalize_repo_identity_refuses_a_name_the_forge_would_not_accept():
+    n = repository_mod._normalize_repo_identity
+    assert n("https://github.com/o/r -x=y") is None
+    assert n("https://github.com/o/--upload-pack=sh") is None
+    assert n("https://github.com/o/r$(id)") is None
+
+
+def test_owner_repo_shape_refuses_a_leading_dash_in_either_segment():
+    # The value is one argv token to `gh --repo`, so a leading dash is read as an
+    # option rather than as a repository.
+    shape = runtime_mod.is_owner_repo_shape
+    assert shape("-o/r") is False
+    assert shape("o/-r") is False
+    assert shape("--upload-pack=x/r") is False
+    assert repository_mod._normalize_repo_identity("https://github.com/-o/r.git") is None
+    # Controls: a dash inside a segment is a legitimate forge name.
+    assert shape("a-b/c-d") is True
+    assert shape("kirodotdev/KiroCrew") is True
+
+
+def test_the_remote_url_rule_has_exactly_one_home():
+    # `fleet_state` imports `repository`, so `repository` cannot import
+    # `fleet_state`; the rule therefore lives in `runtime`, which both import. A
+    # per-module copy is what let this third derivation site keep the credential
+    # after the first two had been fixed, so the copy is what this pins against.
+    import inspect
+
+    assert fleet_state_mod._remote_url_locator is not runtime_mod.remote_url_locator
+    for url in ("https://github.com/o/r.git?t=1", "git@h:o/r#f", "", "https://h/o/r"):
+        assert fleet_state_mod._remote_url_locator(url) == runtime_mod.remote_url_locator(url)
+    # Only `runtime` may spell the cut out; a re-implementation elsewhere is the
+    # regression this catches.
+    cut = 'r"[?#]"'
+    for module in (fleet_state_mod, repository_mod):
+        src = inspect.getsource(module)
+        assert cut not in src, f"{module.__name__} re-spells the locator cut"
+
+
 # --- _find_worktree ambiguity rejection ---
 @pytest.mark.asyncio
 async def test_find_worktree_ambiguous():
@@ -2378,6 +2506,14 @@ def _assert_git_neutralizers(env):
         "core.hooksPath": "/dev/null",
         "credential.helper": "",
         "core.sshCommand": "ssh",
+        # Signature verification, the third repo-controlled driver class beside
+        # filters and textconv: `showSignature` is the trigger and the four
+        # `gpg.*.program` spellings are what it would exec.
+        "gpg.program": "true",
+        "gpg.openpgp.program": "true",
+        "gpg.ssh.program": "true",
+        "gpg.x509.program": "true",
+        "log.showSignature": "false",
     }
 
 
@@ -3463,7 +3599,7 @@ def test_git_env_neutralizers_present():
     assert n["GIT_NO_REPLACE_OBJECTS"] == "1"
     # GIT_NO_REPLACE_OBJECTS is an env var in its own right, NOT one of the
     # config pairs, so the count must not have grown to cover it.
-    assert n["GIT_CONFIG_COUNT"] == "4"
+    assert n["GIT_CONFIG_COUNT"] == "9"
     assert n["GIT_CONFIG_KEY_0"] == "core.fsmonitor"
     assert n["GIT_CONFIG_VALUE_0"] == "false"
     assert n["GIT_CONFIG_KEY_1"] == "core.hooksPath"
@@ -3472,6 +3608,26 @@ def test_git_env_neutralizers_present():
     assert n["GIT_CONFIG_VALUE_2"] == ""
     assert n["GIT_CONFIG_KEY_3"] == "core.sshCommand"
     assert n["GIT_CONFIG_VALUE_3"] == "ssh"
+    # Signature verification: the trigger plus every program spelling it can name.
+    # `log` is on the foreign-checkout safelist, so `[log] showSignature=true` with a
+    # `gpg.*.program` payload is a read that execs the repository's own program.
+    # `gpg.openpgp.program` is a synonym for `gpg.program` and overrides it, so
+    # pinning only the bare key would leave the synonym free.
+    assert n["GIT_CONFIG_KEY_4"] == "gpg.program"
+    assert n["GIT_CONFIG_VALUE_4"] == "true"
+    assert n["GIT_CONFIG_KEY_5"] == "gpg.openpgp.program"
+    assert n["GIT_CONFIG_VALUE_5"] == "true"
+    assert n["GIT_CONFIG_KEY_6"] == "gpg.ssh.program"
+    assert n["GIT_CONFIG_VALUE_6"] == "true"
+    assert n["GIT_CONFIG_KEY_7"] == "gpg.x509.program"
+    assert n["GIT_CONFIG_VALUE_7"] == "true"
+    assert n["GIT_CONFIG_KEY_8"] == "log.showSignature"
+    assert n["GIT_CONFIG_VALUE_8"] == "false"
+    # The count and the pairs must agree, or git reads a prefix of them and the
+    # pins past the count are silently inert.
+    assert int(n["GIT_CONFIG_COUNT"]) == sum(
+        1 for key in n if key.startswith("GIT_CONFIG_KEY_")
+    )
 
 
 @pytest.mark.skipif(
@@ -6586,6 +6742,84 @@ def test_parse_html_repo_base_variants():
     assert p("not a url") is None
 
 
+def test_parse_html_repo_base_drops_a_query_or_fragment_credential():
+    # A foreign repo's own config may hold ``?access_token=…`` — git accepts it
+    # and smart-HTTP honours it — and the derived base becomes an issue-link
+    # href, so neither component may survive into it.
+    p = mod._parse_html_repo_base
+    secret = "ghp_SECRETTOKEN0123456789"
+    for url in (
+        f"https://github.com/o/r.git?access_token={secret}",
+        f"https://github.com/o/r?access_token={secret}",
+        f"https://github.com/o/r.git#{secret}",
+        f"ssh://git@github.com/o/r.git?access_token={secret}",
+        f"git@github.com:o/r.git?access_token={secret}",
+    ):
+        base = p(url)
+        assert base is not None, url
+        assert secret not in base, url
+        assert "?" not in base and "#" not in base, url
+        # The suffix strip must still apply AFTER the cut: were the query
+        # removed later, ``.git`` would sit before it and survive.
+        assert base == "https://github.com/o/r", url
+    # A base made only of a query is unparseable, not a bare scheme.
+    assert p(f"?access_token={secret}") is None
+
+
+def test_parse_html_repo_base_leaves_a_clean_url_byte_identical():
+    # Control for the cut above: it must not shorten a legitimate remote.
+    p = mod._parse_html_repo_base
+    assert p("https://github.com/kirodotdev/KiroCrew.git") == "https://github.com/kirodotdev/KiroCrew"
+    assert p("https://ghe.corp.example/team/repo") == "https://ghe.corp.example/team/repo"
+    assert p("https://github.com:443/o/r.git") == "https://github.com/o/r"
+
+
+@pytest.mark.asyncio
+async def test_build_context_issue_href_carries_no_credential():
+    # End-to-end: the base is resolved from the repository's own remote, so the
+    # href the dashboard renders must be redacted like every neighbouring
+    # display field, not trusted for having been parsed.
+    secret = "ghp_SECRETTOKEN0123456789"
+    log = "feat: thing\x1fFixes #147\x1e"
+    with patch.object(repository_mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"), \
+         patch.object(repository_mod, "_git", new_callable=AsyncMock, return_value=log), \
+         patch.object(repository_mod, "_run_gated_git_soft", new_callable=AsyncMock,
+                      return_value=(0, f"https://github.com/o/r.git?access_token={secret}", "")), \
+         patch.object(repository_mod, "_load_dev_fleet_cfg", return_value={}):
+        fleet_state_mod._HTML_BASE = None
+        try:
+            ctx = await mod._build_context("feat/thing", "/wt/thing", None)
+        finally:
+            fleet_state_mod._HTML_BASE = None
+    assert [i["number"] for i in ctx["issues"]] == [147]
+    url = ctx["issues"][0]["url"]
+    assert url is not None
+    assert secret not in url
+    assert url == "https://github.com/o/r/issues/147"
+
+
+@pytest.mark.asyncio
+async def test_build_context_issue_href_redacts_a_credential_in_the_path():
+    # A secret in the PATH is a case the query/fragment cut cannot reach: there
+    # is no query to remove. Only the redaction layer catches it, so this is
+    # what makes that call load-bearing rather than belt-and-braces.
+    log = "feat: thing\x1fFixes #147\x1e"
+    with patch.object(repository_mod, "_upstream_remote", new_callable=AsyncMock, return_value="origin"), \
+         patch.object(repository_mod, "_git", new_callable=AsyncMock, return_value=log), \
+         patch.object(repository_mod, "_run_gated_git_soft", new_callable=AsyncMock,
+                      return_value=(0, "https://github.com/o/AKIAIOSFODNN7EXAMPLE.git", "")), \
+         patch.object(repository_mod, "_load_dev_fleet_cfg", return_value={}):
+        fleet_state_mod._HTML_BASE = None
+        try:
+            ctx = await mod._build_context("feat/thing", "/wt/thing", None)
+        finally:
+            fleet_state_mod._HTML_BASE = None
+    url = ctx["issues"][0]["url"]
+    assert url is not None
+    assert "AKIAIOSFODNN7EXAMPLE" not in url
+    assert "REDACTED" in url
+
+
 # --- _pr_query_one carries title, hides body, and _redact_pr drops internals ---
 @pytest.mark.asyncio
 async def test_pr_query_one_carries_title_and_hides_body():
@@ -6658,7 +6892,11 @@ async def test_context_cached_skips_main_and_base():
 async def test_context_cached_serves_from_cache(monkeypatch):
     calls = []
 
-    async def fake_build(branch, path, pr):
+    async def fake_build(branch, path, pr, *, generation=None):
+        # Mirrors the real signature: `_context_cached` forwards the captured
+        # generation, and a stub that rejects it raises a TypeError the caller's
+        # best-effort `except` swallows -- leaving an empty context cached and a
+        # call count of zero, which reads as a cache hit that never happened.
         calls.append(branch)
         return {"issues": [{"number": 1, "url": None}], "tickets": [], "summary": "s"}
 
@@ -6830,7 +7068,9 @@ async def test_fleet_payload_marks_an_inferred_main_checkout():
 @pytest.mark.asyncio
 async def test_fleet_payload_redacts_credentials_in_main_repo():
     sensitive = f"/tmp/ghp_{'A' * 40}/checkout"
-    with patch.object(repository_mod, "_repo", return_value=sensitive):
+    # ``_repo_read`` is the accessor the payload reads: rendering the path is a
+    # read, and it must still render for a checkout this app may only read.
+    with patch.object(repository_mod, "_repo_read", return_value=sensitive):
         fleet = await _fleet_with(
             [{"path": "/repo", "branch": "main", "is_main": True}]
         )
@@ -6842,7 +7082,7 @@ async def test_fleet_payload_redacts_credentials_in_main_repo():
 @pytest.mark.asyncio
 async def test_fleet_payload_preserves_ordinary_main_repo_path():
     ordinary = "/home/user/oss/KiroCrew"
-    with patch.object(repository_mod, "_repo", return_value=ordinary):
+    with patch.object(repository_mod, "_repo_read", return_value=ordinary):
         fleet = await _fleet_with(
             [{"path": "/repo", "branch": "main", "is_main": True}]
         )

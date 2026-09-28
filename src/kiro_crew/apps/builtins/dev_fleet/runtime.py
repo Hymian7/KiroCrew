@@ -6,6 +6,7 @@ import asyncio
 import functools
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -48,6 +49,52 @@ def _redact_pr(pr: dict | None) -> dict | None:
         for k, v in pr.items()
         if not k.startswith("_")  # _repo etc. stay internal
     }
+
+
+# --- the one home of "what part of a git remote URL may be derived from" ---
+#
+# It lives HERE, in the module both ``repository`` and ``fleet_state`` already
+# import, because ``fleet_state`` imports ``repository`` and so the reverse
+# import is a cycle -- a rule that cannot be shared gets copied, and a copied
+# rule is exactly how this leak survived being closed twice: the cut was added
+# at the html-base derivation, then at the owner/repo derivation, and the third
+# derivation site kept it both times.
+
+
+def remote_url_locator(remote_url: str) -> str:
+    """The locator half of a git remote URL: everything before a ``?`` or ``#``.
+
+    ``git remote set-url`` accepts a query or fragment and smart-HTTP transports
+    honour it, so a repository this app may only READ can hold
+    ``?access_token=...`` in its own config. No derivation this app makes from a
+    remote URL wants that credential: one becomes a browser URL rendered into an
+    issue-link ``href``, the others become an ``owner/repo`` name handed to
+    ``gh --repo`` in a child process's argv.
+
+    The cut must PRECEDE any pattern that anchors on ``$``. A retained ``?...``
+    sits between a trailing ``.git`` and the end of the string, so a suffix the
+    pattern means to strip survives, and one remote then derives a different
+    name than the same remote written without a query."""
+    return re.split(r"[?#]", remote_url or "", maxsplit=1)[0].strip()
+
+
+# A shape the forge itself accepts. ``remote_url_locator`` removes the reachable
+# leak; this refuses everything else a remote URL's path could carry into argv,
+# rather than trusting an enumeration of what that might be.
+#
+# Neither segment may OPEN with ``-``: the value is passed as one argv token to
+# ``gh --repo``, so a leading dash is read as an option rather than as a
+# repository, and the forge rejects such a name anyway. The sibling branch-name
+# guard refuses a leading dash for the same reason.
+_OWNER_REPO_SHAPE_RE = re.compile(r"[A-Za-z0-9._][A-Za-z0-9._\-]*/[A-Za-z0-9._][A-Za-z0-9._\-]*")
+
+
+def is_owner_repo_shape(owner_repo: str) -> bool:
+    """True when ``owner_repo`` is a plain ``owner/repo`` pair and nothing else.
+
+    Every value that reaches ``gh --repo`` in child argv, or that becomes a
+    worktree-name prefix, is required to pass this."""
+    return bool(owner_repo) and re.fullmatch(_OWNER_REPO_SHAPE_RE, owner_repo) is not None
 
 
 # --- stream watchdog deadline (module constant so tests can patch it) ---
@@ -146,12 +193,25 @@ def _find_cli() -> list[str]:
 # first and a tamper pin second, and it is an env var rather than a config pair
 # so no config precedence applies to it at all. ``update_governance`` and
 # ``auto_improvement``'s clone setup already pin it for the same reason.
+#
+# GIT_OPTIONAL_LOCKS is the other non-config pin, and it is about WHAT GIT WRITES
+# on a read. ``git status`` refreshes the index's stat cache and saves it back,
+# taking ``index.lock`` to do so, which makes a command that is a read to its
+# caller a WRITE to the repository. Every fleet render runs one per row, so
+# against a checkout this app may only read the guarantee would break on the
+# ordinary path, and against this product's own checkout the fleet contends with
+# the operator's git for the lock. Set to ``0`` here rather than as a
+# ``--no-optional-locks`` flag per call site so the argv this handler builds stays
+# the subcommand it names, and so a read added later inherits it. Nothing this
+# handler needs is lost: the porcelain answer is identical, and a real mutation
+# still takes the locks it REQUIRES.
 # Harmless for non-git commands (pip/npm ignore GIT_*).
 _GIT_ENV_NEUTRALIZERS: dict[str, str] = {
     "GIT_ALLOW_PROTOCOL": "https:ssh",
     "GIT_PROTOCOL_FROM_USER": "0",
     "GIT_NO_REPLACE_OBJECTS": "1",
-    "GIT_CONFIG_COUNT": "4",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_CONFIG_COUNT": "9",
     "GIT_CONFIG_KEY_0": "core.fsmonitor",
     "GIT_CONFIG_VALUE_0": "false",
     "GIT_CONFIG_KEY_1": "core.hooksPath",
@@ -160,7 +220,71 @@ _GIT_ENV_NEUTRALIZERS: dict[str, str] = {
     "GIT_CONFIG_VALUE_2": "",
     "GIT_CONFIG_KEY_3": "core.sshCommand",
     "GIT_CONFIG_VALUE_3": "ssh",
+    # Signature VERIFICATION is the third driver class, beside the filter and
+    # textconv drivers the foreign-checkout safelist reasons about. `log` is ON
+    # that safelist because it converts no content -- true, and beside the point
+    # here: `[log] showSignature=true` in the repository's own config makes git
+    # verify every signature it prints, and verification EXECS the program these
+    # keys name. So a checkout this app may only read could hand it a payload to
+    # run. `update_governance` pins the same key against the same vector.
+    #
+    # All four spellings, not just `gpg.program`: `gpg.<format>.program` selects
+    # the program per signature format, and `gpg.openpgp.program` is a synonym for
+    # `gpg.program` that overrides it -- pinning only the bare key would leave the
+    # synonym as an unpinned way to name the same exec.
+    "GIT_CONFIG_KEY_4": "gpg.program",
+    "GIT_CONFIG_VALUE_4": "true",
+    "GIT_CONFIG_KEY_5": "gpg.openpgp.program",
+    "GIT_CONFIG_VALUE_5": "true",
+    "GIT_CONFIG_KEY_6": "gpg.ssh.program",
+    "GIT_CONFIG_VALUE_6": "true",
+    "GIT_CONFIG_KEY_7": "gpg.x509.program",
+    "GIT_CONFIG_VALUE_7": "true",
+    # The TRIGGER, pinned beside the four programs it would exec. `showSignature`
+    # is what turns a plain `git log` into a verifying one, and the repository
+    # controls it, so pinning only the programs would leave a foreign checkout able
+    # to make every log read spawn a child -- `true` now, but a program name is a
+    # value and this is a place not to depend on one.
+    #
+    # Pinned HERE rather than as `--no-show-signature` at each `log` call site, for
+    # the reason GIT_OPTIONAL_LOCKS above is: the argv this handler builds keeps
+    # naming just its subcommand, and a `log` read added later inherits the pin
+    # instead of having to remember a flag. The flag form also has a measured cost
+    # -- an earlier round of this change put a global flag in the argv and broke 28
+    # shard tests whose stubs match the argv they expect, in a file this change does
+    # not own.
+    "GIT_CONFIG_KEY_8": "log.showSignature",
+    "GIT_CONFIG_VALUE_8": "false",
 }
+
+
+def _credential_store_dirs() -> tuple[str, ...]:
+    """The credential homes a FOREIGN checkout's read must not be able to reach.
+
+    Passed as ``extra_hidden_dirs`` for a read of a checkout this app does not own, so
+    that where the sandbox can enforce a mask, the stores are masked outright instead of
+    being left readable behind a pre-spawn check. The env pins above stop git being
+    ASKED to run the repository's program; this bounds what such a program could read if
+    one ran anyway -- a config the repository rewrote between the clearance and the exec,
+    which no check-then-spawn closes.
+
+    Not a substitute for the clearance and not a claim the mask landed: on a host where
+    ``sandbox.credential_mask_applies`` is False -- the nested case, where this backend
+    is itself already sandboxed -- these are DROPPED unread, because the passthrough
+    returns before a backend is chosen. The caller is what decides what to do about
+    that; this function only names the directories.
+
+    Resolved per call rather than at import: ``$HOME`` is read at spawn time by every
+    other consumer here, and a module-level tuple would bake in the home of whatever
+    process imported this first.
+    """
+    home = os.path.expanduser("~")
+    return (
+        os.path.join(home, ".aws"),
+        os.path.join(home, ".ssh"),
+        os.path.join(home, ".kube"),
+    )
+
 
 # The credential.helper reset above kills repo-injected helpers (the attack
 # vector) but ALSO the operator's own GLOBAL helper (e.g. `gh auth
@@ -433,6 +557,51 @@ def _toolchain_bin(name: str) -> str | None:
     return find_node_tool(name, _TRUSTED_PATH) or _trusted_bin(name)
 
 
+async def _capture_bounded(
+    proc, cap: int, kill: "Callable[[], Awaitable[None]]"
+) -> tuple[bytes, bytes, bool]:
+    """Read both pipes CONCURRENTLY, stopping once either passes *cap*.
+
+    Concurrently, because a child writing hard to one pipe blocks forever when the
+    other is not drained -- that is what ``communicate`` exists to avoid, and a naive
+    sequential bounded read reintroduces it as a hang.
+
+    The reader that overflows KILLS the child before returning, so the sibling pipe
+    reaches EOF at once instead of waiting out the whole timeout for a child that is
+    blocked writing into a pipe nobody is reading.
+
+    Waits for the child before returning, which is the difference between this and a
+    plain pair of pipe reads. EOF on both pipes says the child closed them, not that it
+    exited: the exit status arrives on a separate child-watcher callback, so
+    ``proc.returncode`` is still ``None`` at that moment and a caller reading it scores
+    a failed command as rc 0. ``communicate`` ends with the same wait for the same
+    reason. Bounded by the caller's own ``wait_for``, so a child that closes its pipes
+    and then hangs is a timeout rather than a hang here.
+    """
+    overflowed = False
+
+    async def _one(stream) -> bytes:
+        nonlocal overflowed
+        if stream is None:
+            return b""
+        buf = bytearray()
+        while True:
+            chunk = await stream.read(65536)
+            if not chunk:
+                return bytes(buf)
+            buf.extend(chunk)
+            if len(buf) > cap:
+                overflowed = True
+                await kill()
+                return bytes(buf[:cap])
+
+    out, err = await asyncio.gather(_one(proc.stdout), _one(proc.stderr))
+    # The child is reaped by the overflow path already; awaiting a second time is
+    # harmless and keeps one exit path for both branches.
+    await proc.wait()
+    return out, err, overflowed
+
+
 async def _run_cmd(
     cmd: list[str],
     *,
@@ -441,6 +610,8 @@ async def _run_cmd(
     timeout: int = 30,
     mode: str = "standard",
     pre_spawn: Callable[[], Awaitable[str | None]] | None = None,
+    max_output_bytes: int | None = None,
+    extra_hidden_dirs: tuple[str, ...] = (),
 ) -> tuple[int, str, str]:
     """Run a subprocess asynchronously, return (returncode, stdout, stderr).
 
@@ -458,7 +629,13 @@ async def _run_cmd(
 
     ``_GIT_ENV_NEUTRALIZERS`` pins transports AND neutralizes every
     repo-controlled execution vector (fsmonitor/hooks/credential
-    helper/sshCommand) for every git this handler ever runs.
+    helper/sshCommand/signature drivers) for every git this handler ever runs.
+
+    ``extra_hidden_dirs`` is forwarded to the sandbox chokepoint for a caller that
+    needs directory trees denied to this one child -- the foreign-checkout read passes
+    the credential homes. It is a REQUEST: ``sandbox.credential_mask_applies`` is what
+    says whether a host will honour it, and on the nested path it is dropped unread, so
+    a caller must not treat passing it as containment.
     """
     base_env = dict(env) if env is not None else dict(os.environ)
     # Pin executable + PATH to trusted system dirs: the inherited service
@@ -484,8 +661,28 @@ async def _run_cmd(
     try:
         # sandboxed_spawn_argv can cold-probe the sandbox backend with a
         # synchronous subprocess (blocking base rule) — run it on the executor.
+        # The mask kwarg is passed ONLY when a caller actually asked for one, as
+        # two explicit partials rather than an unpacked dict: `**kwargs` erases the
+        # keyword's type and mypy then matches it against the bool-typed tail of
+        # `sandboxed_spawn_argv`. Every ordinary read asks for nothing and keeps
+        # the exact call shape it has always had.
+        if extra_hidden_dirs:
+            prepare = functools.partial(
+                sandboxed_spawn_argv,
+                cmd,
+                mode,
+                env=base_env,
+                extra_hidden_dirs=extra_hidden_dirs,
+            )
+        else:
+            prepare = functools.partial(
+                sandboxed_spawn_argv,
+                cmd,
+                mode,
+                env=base_env,
+            )
         cmd, env, cleanup = await shielded_prepare_off_loop(
-            functools.partial(sandboxed_spawn_argv, cmd, mode, env=base_env),
+            prepare,
             executor=subprocess_executor(),
         )
     except RuntimeError as exc:
@@ -526,8 +723,24 @@ async def _run_cmd(
                 pass
         return -1, "", f"spawn failed: {exc}"
     try:
+
+        async def _reap() -> None:
+            await _kill_tree(proc.pid)
+            await platform_compat.kill_and_reap(proc)
+
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            if max_output_bytes is None:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            else:
+                # Bounded for a read whose SUBJECT is repository-controlled: a foreign
+                # commit message has no size this app agreed to, and `communicate`
+                # would hold all of it in the gateway before any check could look.
+                stdout, stderr, overflowed = await asyncio.wait_for(
+                    _capture_bounded(proc, max_output_bytes, _reap), timeout=timeout
+                )
+                if overflowed:
+                    await _reap()
+                    return -1, "", f"output passed the {max_output_bytes}-byte bound"
         except asyncio.TimeoutError:
             await _kill_tree(proc.pid)
             await platform_compat.kill_and_reap(proc)
@@ -543,7 +756,11 @@ async def _run_cmd(
             await platform_compat.kill_and_reap(proc)
             raise
         return (
-            proc.returncode or 0,
+            # An unknown status is a FAILURE, not a success. `or 0` mapped None to 0,
+            # so a git that exited 128 was reported as having succeeded with empty
+            # output, and a call site gating on `rc != 0` rendered an empty answer
+            # instead of raising with git's stderr.
+            proc.returncode if proc.returncode is not None else -1,
             (stdout or b"").decode(errors="replace"),
             (stderr or b"").decode(errors="replace"),
         )
