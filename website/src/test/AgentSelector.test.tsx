@@ -45,4 +45,39 @@ describe('AgentSelector', () => {
     render(<AgentSelector agents={agents} defaultAgent="coding" value="" onChange={() => {}} />)
     expect(screen.getByText('coding')).toBeInTheDocument()
   })
+
+  describe('a crew with a display name', () => {
+    const crews: KiroCrewAgent[] = [
+      ...agents,
+      {
+        name: 'Release Writer',
+        member_id: 'release-writer',
+        display_name: 'Release Writer',
+        kiro_agent: 'kirocrew',
+        workspace: 'default',
+        memory_store: 'member-release-writer',
+      },
+    ]
+
+    it('dispatches the member_id, never the label, so a rename cannot strand the slot', () => {
+      const onChange = vi.fn()
+      render(<AgentSelector agents={crews} defaultAgent="coding" value="coding" onChange={onChange} />)
+      fireEvent.click(screen.getByLabelText('Switch agent'))
+      fireEvent.click(screen.getByText('Release Writer'))
+      expect(onChange).toHaveBeenCalledWith('release-writer')
+    })
+
+    it('shows the label for a slot that stores the member_id', () => {
+      render(<AgentSelector agents={crews} defaultAgent="coding" value="release-writer" onChange={() => {}} />)
+      expect(screen.getByText('Release Writer')).toBeInTheDocument()
+      fireEvent.click(screen.getByLabelText('Switch agent'))
+      expect(screen.getByRole('option', { selected: true })).toHaveTextContent('Release Writer')
+    })
+
+    it('still matches an older slot that stored the label', () => {
+      render(<AgentSelector agents={crews} defaultAgent="coding" value="Release Writer" onChange={() => {}} />)
+      fireEvent.click(screen.getByLabelText('Switch agent'))
+      expect(screen.getByRole('option', { selected: true })).toHaveTextContent('Release Writer')
+    })
+  })
 })

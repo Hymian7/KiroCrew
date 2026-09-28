@@ -11,7 +11,13 @@ import ErrorNotice from './ErrorNotice'
 
 import { i18nT } from '../i18n/t'
 export interface KiroCrewAgent {
+  /** The crew's display name. Every `/api/agents/{name}` route resolves it, and
+   *  resolves `member_id` too, so addressing by `name` keeps working; `name` is
+   *  an alias of `display_name` kept for one release. */
   name: string
+  /** The `config.agents` key: the crew's immutable identity (empty for a
+   *  project-scope row). Optional: older payloads predate the field. */
+  member_id?: string
   kiro_agent: string
   workspace: string
   memory_store: string
@@ -21,10 +27,8 @@ export interface KiroCrewAgent {
   /** This agent's own default reasoning effort. '' means inherit the global
    *  default. Optional: older payloads predate the field. */
   reasoning_effort?: string
-  /** Optional label shown in place of `name`. Presentation only: `name` stays
-   *  the immutable identity every route, dispatch and binding is keyed on.
-   *  Empty or absent means the name itself is displayed. Optional: older
-   *  payloads predate the field. */
+  /** The crew's display name (free-form; renaming edits this field only, the
+   *  identity is `member_id`). Optional: older payloads predate the field. */
   display_name?: string
   description: string
   /** Free-text routing intent read by the orchestrator's select_crew. Optional:
@@ -130,16 +134,23 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange, m
   const inputRef = useRef<HTMLInputElement>(null)
 
   const active = value || defaultAgent || (agents[0]?.name ?? 'default')
+  // The slot stores the crew's IDENTITY (`member_id`), never its label: a
+  // rename must not strand the slot. Older slots (and project rows, which
+  // have no id) still hold the name, so a row matches on either handle.
+  const crewHandle = (a: KiroCrewAgent): string => a.member_id || a.name
+  const isHandleOf = (a: KiroCrewAgent, handle: string): boolean =>
+    handle === a.name || (!!a.member_id && handle === a.member_id)
   // What the trigger shows for the active agent: its display label when the
   // roster row is at hand, the raw identity otherwise (a roster still loading,
   // or a value naming an agent the roster does not list).
-  const activeAgent = agents.find(a => a.name === active)
+  const activeAgent = agents.find(a => isHandleOf(a, active))
   const activeLabel = activeAgent ? crewDisplayName(activeAgent) : active
 
   const filtered = useMemo(
     () => filter
       ? agents.filter(a =>
-          (a.name + ' ' + (a.display_name ?? '')).toLowerCase().includes(filter.toLowerCase()))
+          (a.name + ' ' + (a.member_id ?? '') + ' ' + (a.display_name ?? ''))
+            .toLowerCase().includes(filter.toLowerCase()))
       : agents,
     [agents, filter],
   )
@@ -175,7 +186,7 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange, m
   }, [modal])
 
   const handleSelect = useCallback((a: KiroCrewAgent) => {
-    onChange(a.name)
+    onChange(crewHandle(a))
     closeToTrigger()
   }, [onChange, closeToTrigger])
 
@@ -258,8 +269,8 @@ export default function AgentSelector({ agents, defaultAgent, value, onChange, m
   // marks the row named as the default — a template-only default carries it
   // truthfully.
   const renderRow = (a: KiroCrewAgent) => {
-    const isCurrent = active === a.name
-    const isDefault = a.name === defaultAgent
+    const isCurrent = isHandleOf(a, active)
+    const isDefault = isHandleOf(a, defaultAgent)
     return (
       <Btn
         key={a.name}
