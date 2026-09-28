@@ -81,6 +81,14 @@ export function FolderBody({
         // its automatic minimum height is its content height again and the
         // `0fr` track would stop collapsing. An explicit 0 restores the collapse.
         minHeight: 0,
+        // Same for width: as a scroll container this box shrank to its grid
+        // column, so a session row's title could ellipsize. Without a scroll
+        // container its automatic minimum width is the widest unbreakable line
+        // inside it, and one long title widens every ancestor up to the sidebar:
+        // folder counts, menu and add buttons are pushed past the lane's right
+        // edge and the sidebar can no longer be narrowed. An explicit 0 lets
+        // the rows clamp to the lane.
+        minWidth: 0,
         visibility: open ? 'visible' : 'hidden',
         contentVisibility: layoutSuppressed ? 'hidden' : 'visible',
         padding: open ? padding : 0,

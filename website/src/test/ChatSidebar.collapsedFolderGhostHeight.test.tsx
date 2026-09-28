@@ -154,6 +154,10 @@ describe('collapsed folder contributes no layout height', () => {
     // capture the sticky nested folder headers inside it.
     expect(style).toContain('overflow: clip')
     expect(style).toContain('min-height: 0')
+    // Without a scroll container the box's minimum width is its widest
+    // unbreakable line, so one long session title would push the folder rows'
+    // count and buttons past the lane's right edge.
+    expect(style).toContain('min-width: 0')
   })
 
   it('keeps the collapsed rows mounted for keyboard navigation', async () => {
