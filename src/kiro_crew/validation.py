@@ -2301,6 +2301,23 @@ CHAT_FOLDER_CREATE_SCHEMA = ToolSchema(
     ],
 )
 
+#: Most folders one chat_folder_prune call may name; the server caps the same.
+MAX_CHAT_FOLDER_PRUNE = 100
+
+CHAT_FOLDER_PRUNE_SCHEMA = ToolSchema(
+    tool_name="chat_folder_prune",
+    fields=[
+        FieldSpec(
+            "folders",
+            list,
+            required=True,
+            item_type=str,
+            item_max_len=_ARTIFACT_FOLDER_REF_MAX,
+            max_items=MAX_CHAT_FOLDER_PRUNE,
+        ),
+    ],
+)
+
 CHAT_FOLDER_MOVE_SCHEMA = ToolSchema(
     tool_name="chat_folder_move",
     fields=[
@@ -3694,6 +3711,7 @@ MCP_DASHBOARD_SCHEMAS: dict[str, ToolSchema] = {
     "chat_folder_tree": CHAT_FOLDER_TREE_SCHEMA,
     "chat_folder_create": CHAT_FOLDER_CREATE_SCHEMA,
     "chat_folder_move": CHAT_FOLDER_MOVE_SCHEMA,
+    "chat_folder_prune": CHAT_FOLDER_PRUNE_SCHEMA,
     "chat_folder_move_session": CHAT_FOLDER_MOVE_SESSION_SCHEMA,
     "chat_folder_file_self": CHAT_FOLDER_FILE_SELF_SCHEMA,
     "chat_tag_list": CHAT_TAG_LIST_SCHEMA,

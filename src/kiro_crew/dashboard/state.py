@@ -7582,12 +7582,16 @@ class DashboardState:
         self,
         mutate: Callable[[list[dict[str, Any]]], tuple[bool, _T]],
         on_committed: Callable[[], None] | None = None,
+        *,
+        prepare: Callable[[], Awaitable[None]] | None = None,
     ) -> _T:
         """Serialize a folder mutation and confirm its off-loop persistence.
 
         ``on_committed`` runs under the repository lock only after the write
         is proven, so callers can attach side effects that must not outlive a
-        rolled-back or no-op transaction.
+        rolled-back or no-op transaction. ``prepare`` is awaited under the same
+        lock just before ``mutate``, for off-loop reads the mutation must not
+        see go stale.
         """
 
         def _mark_committed() -> None:
@@ -7606,6 +7610,7 @@ class DashboardState:
             lambda: config_dir() / self._FOLDERS_FILE,
             self._write_folders_confirmed,
             _mark_committed,
+            prepare=prepare,
         )
 
     async def read_folders(self, read: Callable[[list[dict[str, Any]]], _T]) -> _T:

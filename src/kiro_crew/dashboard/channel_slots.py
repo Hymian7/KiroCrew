@@ -882,8 +882,114 @@ _RECENT_CLOSES: "weakref.WeakKeyDictionary[Any, dict[str, float]]" = weakref.Wea
 #: reconcile pass, and an hour is orders of magnitude beyond that.
 _CLOSE_TOMBSTONE_TTL_SECS = 3600.0
 
+#: Folder id -> monotonic instant a session filed there last closed, written by
+#: :func:`note_slot_closed` and read by folder prune (:func:`folders_closed_since`).
+#: An entry is only ever read by a prune whose cut-off is at or before it, and
+#: every cut-off is at least :func:`closes_quiet_since`. So once no close and no
+#: prune is in flight, :func:`_trim_folder_closes` empties the map; while either
+#: is, it holds only folders a session closed out of during that stretch.
+_RECENT_FOLDER_CLOSES: "weakref.WeakKeyDictionary[Any, dict[str, float]]" = (
+    weakref.WeakKeyDictionary()
+)
 
-def note_slot_closed(state: "DashboardState", slot_name: str) -> float:
+#: Per state: the cut-off (from :func:`prune_began`) of every prune in flight.
+_PRUNES_IN_FLIGHT: "weakref.WeakKeyDictionary[Any, list[float]]" = weakref.WeakKeyDictionary()
+
+
+def _trim_folder_closes(state: "DashboardState") -> None:
+    """Drop every folder-close entry no current or future prune can read."""
+    closes = _RECENT_FOLDER_CLOSES.get(state)
+    if not closes:
+        return
+    activity = _CLOSE_ACTIVITY.get(state)
+    in_flight = _PRUNES_IN_FLIGHT.get(state, [])
+    if not in_flight and (activity is None or activity[0] == 0):
+        # Every close has saved, so any later prune's scan sees them all.
+        closes.clear()
+        return
+    floor = min([closes_quiet_since(state), *in_flight])
+    for stale in [fid for fid, when in closes.items() if when < floor]:
+        del closes[stale]
+
+
+def prune_began(state: "DashboardState") -> float:
+    """Start a prune and return its cut-off. Pair every call with :func:`prune_ended`.
+
+    A folder a session closed out of at or after the cut-off is busy for this
+    prune (:func:`folders_closed_since`), and its entry is kept until the prune
+    ends.
+    """
+    since = closes_quiet_since(state)
+    _PRUNES_IN_FLIGHT.setdefault(state, []).append(since)
+    return since
+
+
+def prune_ended(state: "DashboardState", since: float) -> None:
+    """Finish the prune that :func:`prune_began` returned *since* for."""
+    in_flight = _PRUNES_IN_FLIGHT.get(state)
+    if in_flight is not None and since in in_flight:
+        in_flight.remove(since)
+    _trim_folder_closes(state)
+
+
+def note_folder_left(state: "DashboardState", folder_id: str) -> None:
+    """Record that a closing session left *folder_id* (no-op for the top level).
+
+    Called where the close starts and again where the slot is popped: the slot
+    can be refiled in between, and once popped no route can refile it, so the
+    pop-time folder is the one the final save writes.
+    """
+    if not folder_id:
+        return
+    folder_closes = _RECENT_FOLDER_CLOSES.get(state)
+    if folder_closes is None:
+        folder_closes = {}
+        _RECENT_FOLDER_CLOSES[state] = folder_closes
+    folder_closes[str(folder_id)] = time.monotonic()
+    _trim_folder_closes(state)
+
+
+def folders_closed_since(state: "DashboardState", since: float) -> set[str]:
+    """Folder ids a session was closed out of at or after *since* (monotonic)."""
+    closes = _RECENT_FOLDER_CLOSES.get(state) or {}
+    return {fid for fid, when in closes.items() if when >= since}
+
+
+#: Per state: ``[closes in flight, monotonic instant the count last reached 0]``.
+_CLOSE_ACTIVITY: "weakref.WeakKeyDictionary[Any, list[float]]" = weakref.WeakKeyDictionary()
+
+
+def close_began(state: "DashboardState") -> None:
+    """Mark a tab close as in flight. Pair every call with :func:`close_ended`."""
+    activity = _CLOSE_ACTIVITY.setdefault(state, [0, 0.0])
+    activity[0] += 1
+
+
+def close_ended(state: "DashboardState") -> None:
+    """Mark a tab close as finished, its final save written or abandoned."""
+    activity = _CLOSE_ACTIVITY.setdefault(state, [0, 0.0])
+    activity[0] = max(0, activity[0] - 1)
+    if activity[0] == 0:
+        activity[1] = time.monotonic()
+        _trim_folder_closes(state)
+
+
+def closes_quiet_since(state: "DashboardState") -> float:
+    """The last instant no tab close was in flight (monotonic; 0.0 if never).
+
+    Every close recorded BEFORE this instant has finished writing its session to
+    disk, so a disk scan started after it sees that session's placement. A close
+    recorded at or after it may not be on disk yet.
+    """
+    activity = _CLOSE_ACTIVITY.get(state)
+    if activity is None:
+        return 0.0
+    if activity[0] == 0:
+        return time.monotonic()
+    return activity[1]
+
+
+def note_slot_closed(state: "DashboardState", slot_name: str, folder_id: str = "") -> float:
     """Record that *slot_name*'s tab was just closed; return the close instant.
 
     Called synchronously on the event loop by every tab-close path, right where
@@ -902,6 +1008,7 @@ def note_slot_closed(state: "DashboardState", slot_name: str) -> float:
     :func:`_tombstone_blocks` reconstructs with :func:`channel_slot_name`. The
     two derivations must stay identical or the guard silently stops matching.
     """
+    note_folder_left(state, folder_id)
     closes = _RECENT_CLOSES.get(state)
     if closes is None:
         closes = {}

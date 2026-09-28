@@ -61,6 +61,8 @@ class FolderRepository:
         path_provider: Callable[[], Path],
         write_confirmed: Callable[[Path, list[dict[str, Any]]], None],
         on_committed: Callable[[], None] | None = None,
+        *,
+        prepare: Callable[[], Awaitable[None]] | None = None,
     ) -> _T:
         """Serialize one mutation and retain it only after a confirmed off-loop write.
 
@@ -74,8 +76,13 @@ class FolderRepository:
         Keeping post-commit signals in the same critical section prevents two
         concurrent transactions from collapsing a monotonic generation bump.
         It is deliberately skipped for no-op and rolled-back transactions.
+
+        ``prepare`` is awaited under the lock before the callback, so an
+        off-loop read it performs cannot be outrun by another folder writer.
         """
         async with lock:
+            if prepare is not None:
+                await prepare()
             before = [dict(folder) for folder in folders_provider()]
             changed, value = mutate(folders_provider())
             if not changed:

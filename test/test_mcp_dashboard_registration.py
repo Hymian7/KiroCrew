@@ -324,9 +324,11 @@ class TestWhatThisSetGrants:
     A spec that references this server gets every tool in it — there is no
     per-tool granularity in the mount. That is sound for the current tools: they
     grant no read the agent lacks (``list_sessions`` in core already returns every
-    session's title and key) and delete nothing. It stops being sound the moment a
-    capability with real blast radius is added to this same set, because granting
-    the folder tools would silently grant that too.
+    session's title and key) and delete nothing but EMPTY folders
+    (``chat_folder_prune``: the endpoint refuses any subtree holding a session or a
+    setting the person chose, so what it removes is a bare name). It stops being
+    sound the moment a capability with real blast radius is added to this same
+    set, because granting the folder tools would silently grant that too.
 
     This ratchet pins the set, so such a capability fails here until the author
     puts it in a server of its own with the gate it actually needs.
@@ -338,6 +340,7 @@ class TestWhatThisSetGrants:
         "chat_folder_move",
         "chat_folder_move_session",
         "chat_folder_file_self",
+        "chat_folder_prune",
     }
     #: The tag half of sidebar organization. Same posture as the folder tools —
     #: read, create, update (rename/recolor/status) and assign; no delete — so

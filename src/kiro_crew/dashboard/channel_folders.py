@@ -167,6 +167,21 @@ def configured_folder_name(namespace: str) -> str:
         return ""
 
 
+def configured_folder_names() -> set[str]:
+    """Every channel's configured session-folder name, lower-cased; empty when off.
+
+    A channel adopts an existing folder by NAME without stamping it
+    (:func:`ensure_channel_folder`), so the name is the only thing marking that
+    folder as in use. Folder prune reads this to keep such a folder.
+    """
+    names = set()
+    for namespace in CHANNEL_CONFIG_SECTIONS:
+        name = configured_folder_name(namespace).strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
 def _find_folder(folders: list[dict], name: str, namespace: str) -> dict | None:
     """Find the folder *name* addresses, preferring this channel's own folder.
 

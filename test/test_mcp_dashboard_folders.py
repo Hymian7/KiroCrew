@@ -1880,6 +1880,7 @@ class TestAdvertisedSet:
             "chat_folder_move",
             "chat_folder_move_session",
             "chat_folder_file_self",
+            "chat_folder_prune",
             "chat_tag_list",
             "chat_tag_create",
             "chat_tag_update",
@@ -3542,3 +3543,67 @@ class TestFolderFileSelf:
             out = _call_tool_inner("chat_folder_file_self", {"folder": "kirocrew/0811"})
         assert out.startswith("Error:")
         mock_patch.assert_not_called()
+
+
+class TestFolderPrune:
+    """``chat_folder_prune`` forwards candidates; the endpoint decides."""
+
+    def test_resolves_paths_and_posts_ids_once(self) -> None:
+        with (
+            patch("kiro_crew.mcp_dashboard._get", side_effect=_rows),
+            patch(
+                "kiro_crew.mcp_dashboard._post",
+                return_value={
+                    "deleted": ["bbbbbbbbbbbb"],
+                    "skipped": [{"id": "cccccccccccc", "reason": "not empty: holds sessions"}],
+                },
+            ) as mock_post,
+        ):
+            out = _call_tool_inner(
+                "chat_folder_prune",
+                {"folders": ["kirocrew/0811", "Travel", "bbbbbbbbbbbb"]},
+            )
+        path, body = mock_post.call_args.args
+        assert path == "/api/chat/folders/prune"
+        assert body == {"ids": ["bbbbbbbbbbbb", "cccccccccccc"]}
+        assert mock_post.call_args.kwargs["session_key"] == "dashboard:chat-1-100"
+        assert "`kirocrew/0811`" in out and "Deleted 1" in out
+        assert "`Travel` — not empty: holds sessions" in out
+
+    def test_unknown_folders_never_reach_the_endpoint(self) -> None:
+        with (
+            patch("kiro_crew.mcp_dashboard._get", side_effect=_rows),
+            patch("kiro_crew.mcp_dashboard._post") as mock_post,
+        ):
+            out = _call_tool_inner("chat_folder_prune", {"folders": ["Nope", "root"]})
+        mock_post.assert_not_called()
+        assert "Could not find" in out and "`Nope`" in out and "`root`" in out
+
+    def test_endpoint_refusal_is_reported(self) -> None:
+        with (
+            patch("kiro_crew.mcp_dashboard._get", side_effect=_rows),
+            patch(
+                "kiro_crew.mcp_dashboard._post",
+                return_value={"error": "only the person can prune folders"},
+            ),
+        ):
+            out = _call_tool_inner("chat_folder_prune", {"folders": ["Travel"]})
+        assert out == "Error: only the person can prune folders"
+
+    def test_a_channel_caller_is_refused_before_any_read(self) -> None:
+        with (
+            patch(
+                "kiro_crew.mcp_dashboard._refuse_tree_shaping_if_unverifiable",
+                return_value=("channel:slack:C1", "", None),
+            ),
+            patch("kiro_crew.mcp_dashboard._get") as mock_get,
+            patch("kiro_crew.mcp_dashboard._post") as mock_post,
+        ):
+            out = _call_tool_inner("chat_folder_prune", {"folders": ["Travel"]})
+        assert out.startswith("Error:") and "channel agents" in out
+        mock_get.assert_not_called()
+        mock_post.assert_not_called()
+
+    def test_folders_is_required(self) -> None:
+        with pytest.raises(ValidationError):
+            _call_tool_inner("chat_folder_prune", {})

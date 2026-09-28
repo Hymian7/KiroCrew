@@ -4,7 +4,7 @@ One chat session can open, fork, seed, watch, stop and close another one, and ta
 another one under itself in the sidebar. The tools come from the
 `kirocrew-dashboard` MCP server, so an agent that does not mount that server
 never has them — exactly like any other MCP server. This page is the reference
-for all 18 of its tools, written for the agent that is about to use them.
+for all 19 of its tools, written for the agent that is about to use them.
 
 The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
 
@@ -13,7 +13,7 @@ The server is defined in `src/kiro_crew/mcp_dashboard.py`. Two halves:
   `session_release`. These reach another session.
 - **Sidebar shape** — `chat_folder_tree`, `chat_folder_create`,
   `chat_folder_move`, `chat_folder_move_session`, `chat_folder_file_self`,
-  `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
+  `chat_folder_prune`, `chat_tag_list`, `chat_tag_create`, `chat_tag_update`, `chat_tag_assign`,
   `chat_session_pin`. These organize what the person sees in the sidebar.
 
 Everything a created session does is visible: it appears in the user's sidebar
@@ -240,6 +240,7 @@ The sidebar tree the person organizes their sessions in.
 | `chat_folder_move` | `folder` (required), `new_parent`, `before`, `after` | Reparent a folder and/or set its position among siblings. Moves everything inside it; cycle-guarded |
 | `chat_folder_move_session` | `session` (required), `folder` | File another live session into a folder, or omit `folder` to unfile it to the top level |
 | `chat_folder_file_self` | `folder` | File **this** session — the caller — into a folder. Writes only its own placement |
+| `chat_folder_prune` | `folders` (required, list) | Delete the named folders, with their subfolders, when the whole subtree is empty. The dashboard does every check; a folder holding a live or archived session, a setting the person chose (project dir, default agent, tag presets, steering, colour, icon), a channel or scheduled job using it, or an app owner, is kept and reported with the reason |
 
 Read `chat_folder_tree` before you move anything: it renders folders in the order
 the person actually sees, which is what makes a `before` / `after` anchor safe to
@@ -257,6 +258,12 @@ goal's folder first, then create each worker with
 `folder="<goal>/<worker agent>"`, and the person finds the conductor and every
 worker under one heading. It can write no placement but its own, which is why it
 is safe to grant where `chat_folder_move_session` is withheld.
+
+`chat_folder_prune` keeps the sidebar tidy after work finishes: read
+`chat_folder_tree`, name the folders that show no sessions, and let the dashboard
+decide. It never moves or deletes a session, and naming a folder that is not
+empty is safe — it is skipped. Only the person's own sessions may call it; app
+agents, crew members and channel agents are refused.
 
 Folder moves are metadata only: the session keeps its transcript, its model, and
 any running turn. Archived (history) sessions cannot be moved — revive one into

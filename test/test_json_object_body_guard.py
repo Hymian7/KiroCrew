@@ -295,6 +295,10 @@ _CAP_REGISTER: dict[str, tuple[str, str]] = {
         "_MAX_REORDER_BODY_BYTES",
         _BOUNDED_EXPLICIT,
     ),
+    "chat_folders.py::api_chat_folder_prune": (
+        "_MAX_PRUNE_BODY_BYTES",
+        _BOUNDED_EXPLICIT,
+    ),
     # ---- tranche 3 ----
     # chat_handlers.py: control-field slot mutations take the cap; the sites
     # that carry a chat message, queued-edit text, follow-up prompts, or
