@@ -84,7 +84,11 @@ async def _fetch_json(url: str) -> Any | None:
     """
     timeout = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_SECS)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        # trust_env=True lets aiohttp read HTTP(S)_PROXY / NO_PROXY from the
+        # environment. Without it, aiohttp connects directly and every
+        # discovery request fails at DNS/connect in a proxied network, which
+        # surfaces as "N of N providers didn't respond".
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.get(url, headers={"User-Agent": _USER_AGENT}) as resp:
                 if resp.status == 404:
                     return None
