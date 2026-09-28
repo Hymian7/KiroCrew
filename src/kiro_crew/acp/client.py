@@ -5904,6 +5904,11 @@ class AcpClient:
         self._spawn_work_dir = str(self._work_dir)
         self._process: asyncio.subprocess.Process | None = None
         self._pid: int | None = None
+        # The root's process-start identity, read once at spawn and handed to
+        # both the session-file tracker and the identity-bound retirement in
+        # _reset_state, so the line written and the line later compared are one
+        # read of the identity rather than two (see session_pid._pid_start_token).
+        self._spawn_start_token: str | None = None
         # False until shutdown confirms both the root's exit and every tracked
         # descendant's exit. A work-directory reclaim reads this fail-closed
         # verdict after shutdown.
@@ -9820,6 +9825,12 @@ class AcpClient:
                 _track_pid,
                 _track_session_pid,
             )
+            from kiro_crew.session_pid import _pid_start_token
+
+            # Read BEFORE the appends: the identity of the process that holds the
+            # number NOW, kept for the identity-bound retirement in _reset_state
+            # and handed to the tracker so it records this same token.
+            self._spawn_start_token = _pid_start_token(self._pid)
 
             # The PID-file trackers each take an exclusive file lock and do a
             # read-modify-append under it — blocking syscalls that must not run
@@ -9830,7 +9841,9 @@ class AcpClient:
             _loop = asyncio.get_running_loop()
             await _loop.run_in_executor(subprocess_executor(), _track_pid, self._pid)
             # Separate file for startup cleanup.
-            await _loop.run_in_executor(subprocess_executor(), _track_session_pid, self._pid)
+            await _loop.run_in_executor(
+                subprocess_executor(), _track_session_pid, self._pid, self._spawn_start_token
+            )
             await asyncio.sleep(0.3)
             early_descendants = await _loop.run_in_executor(
                 subprocess_executor(), _get_child_pids, self._pid
@@ -10245,9 +10258,11 @@ class AcpClient:
         # unreadable PID is not enough to reclaim its working directory.
         root_confirmed_dead = bool(self._process and self._process.returncode is not None)
         saved_pid = None if platform_compat.IS_WINDOWS else self._pid
+        saved_start_token = self._spawn_start_token
         saved_child_pids = self._child_pids
         self._process = None
         self._pid = None
+        self._spawn_start_token = None
         # The instance id names the process that just ended; a replacement spawn
         # mints its own, so nothing may keep answering with this one in between.
         self._process_instance = ""
@@ -10306,7 +10321,11 @@ class AcpClient:
         # These untrack helpers live in kiro_crew.session, which imports this
         # module transitively, so they must be imported inline.
         from kiro_crew.session import _untrack_child_pids, _untrack_pid, _untrack_session_pid
-        from kiro_crew.session_pid import _pid_gone_or_unmanaged
+        from kiro_crew.session_pid import (
+            _pid_gone_or_unmanaged,
+            _untrack_pid_if_dead,
+            _untrack_root_by_identity,
+        )
 
         survivors: list[int] = []
         if saved_child_pids:
@@ -10328,17 +10347,25 @@ class AcpClient:
                     len(survivors),
                     survivors,
                 )
-        # Untrack parent kiro-cli PID (only if confirmed dead)
+        # Untrack parent kiro-cli PID (only if confirmed dead) -- by IDENTITY,
+        # the way AcpRuntime retires on both its paths. "Confirmed dead" is a
+        # fact about the process, not about its number: the kernel can hand the
+        # number to a root spawned since, and a prefix-matched untrack would take
+        # the successor's lines with it. The token read at spawn names the line
+        # that is ours; the bare line goes only while the number is dead at that
+        # moment. A root whose identity could not be read at spawn keeps the
+        # prefix-matched untrack it always had.
         if saved_pid is not None:
             if _pid_gone_or_unmanaged(saved_pid):
                 try:
-                    _untrack_pid(saved_pid)
+                    if saved_start_token:
+                        if not _untrack_root_by_identity(saved_pid, saved_start_token):
+                            _untrack_pid_if_dead(saved_pid)
+                    else:
+                        _untrack_pid(saved_pid)
+                        _untrack_session_pid(saved_pid)
                 except Exception:
                     logger.debug("untracking PID %s failed", saved_pid, exc_info=True)
-                try:
-                    _untrack_session_pid(saved_pid)
-                except Exception:
-                    logger.debug("untracking session PID %s failed", saved_pid, exc_info=True)
             else:
                 logger.warning(
                     "Retained tracking for live root PID %s that survived "

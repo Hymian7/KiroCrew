@@ -178,6 +178,7 @@ from kiro_crew.session_pid import (
     _track_session_pid,
     _untrack_child_pids,
     _untrack_pid,
+    _untrack_pid_if_dead,
     _untrack_root_by_identity,
     _untrack_session_pid,
     group_vouching_available,
@@ -2967,11 +2968,31 @@ class AcpRuntime:
         register_protected_pid(self._pid)
         # Read BEFORE the appends, so the identity held here is the one this
         # process had when the gateway took it on. It is what lets an OBSERVED
-        # death retire the session line that names THIS process and no other.
+        # death retire the session line that names THIS process and no other --
+        # and it is handed to the tracker below, so the line written and the
+        # line later compared are ONE read of the identity, not two.
         self._spawn_start_token = _pid_start_token(self._pid)
+        # Off the loop, as ``AcpClient._spawn`` does: each tracker takes an
+        # exclusive file lock and now, on a recycled number, rewrites the file
+        # under it -- blocking syscalls the heartbeat and every session would
+        # wait behind. ONE hop for the pair, and the pair's inputs are captured
+        # here so the worker never reads ``self`` after this method has moved on.
+        root_pid = self._pid
+        root_token = self._spawn_start_token
+
+        def _track_root_pids() -> None:
+            _track_pid(root_pid)
+            _track_session_pid(root_pid, root_token)
+
+        tracking = asyncio.get_running_loop().run_in_executor(
+            subprocess_executor(), _track_root_pids
+        )
         try:
-            _track_pid(self._pid)
-            _track_session_pid(self._pid)
+            # Shielded: a cancellation delivered here must not also cancel the
+            # worker's future -- the worker cannot be stopped once it has begun,
+            # and the ``except BaseException`` below relies on being able to
+            # WAIT for it.
+            await asyncio.shield(tracking)
         except Exception:
             # A runtime that is not in the PID files is unreachable by every
             # agent-runtime reaper: cleanup_orphaned_sessions,
@@ -2991,6 +3012,31 @@ class AcpRuntime:
                 self._pid,
                 exc_info=True,
             )
+        except BaseException:
+            # The hop is an AWAIT, so it is a cancellation point -- one that sits
+            # between this method's two ``except BaseException`` reap guards, so
+            # a ``CancelledError`` here would otherwise leave ``spawn()`` with no
+            # ``kill()``: a live child, already shielded from the sweep by
+            # ``register_protected_pid``, recorded in neither registry.
+            #
+            # Two things, in this order. FIRST wait for the worker: it may be
+            # inside ``_track_root_pids`` right now, and an append that lands
+            # AFTER the reap has untracked the pid resurrects a registry line
+            # for a dead, recyclable number -- the line a later sweep kills by.
+            # THEN reap. Both run as ONE task that this frame only WAITS on:
+            # a second ``cancel()`` (a newer slot signal, a slot deletion -- two
+            # ordinary dashboard paths cancel this same eager-spawn task) lands
+            # at the await below, not inside the cleanup, and is absorbed until
+            # the cleanup settles, so the reap cannot be skipped by being asked
+            # twice. The bound is the file-lock ceiling the worker itself lives
+            # under plus the kill path's own. The cancellation propagates after.
+            cleanup = asyncio.ensure_future(self._reap_after_cancelled_tracking(tracking))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            raise
 
         # Everything after the subprocess exists must be guarded: if reader
         # startup or the initialize handshake fails (kiro-cli hang / auth stall),
@@ -3609,9 +3655,27 @@ class AcpRuntime:
                 # Untrack the PID so the orphan sweep doesn't chase a dead entry
                 # (mirrors AcpClient._reset_state). Best-effort — a leftover entry
                 # is only pruned lazily otherwise.
+                #
+                # By IDENTITY, the same way an observed death retires. The reap
+                # above proved THIS process dead, not that its number is still
+                # ours: the kernel can hand the number to a root this gateway
+                # spawns next before this line runs, and a prefix-matched untrack
+                # would then take the successor's lines with it. The recorded
+                # start token names the line that is ours; the bare line is
+                # removed only while the number is dead at that moment. A root
+                # whose identity could not be read at spawn has no token to
+                # compare, so it keeps the prefix-matched untrack it always had.
                 try:
-                    _untrack_pid(pid)
-                    _untrack_session_pid(pid)
+                    if self._spawn_start_token:
+                        if not _untrack_root_by_identity(pid, self._spawn_start_token):
+                            # No session line of ours to retire (spawn's append
+                            # failed, or a successor already replaced it): the
+                            # bare line still goes, but only while the number
+                            # is dead -- never by number alone.
+                            _untrack_pid_if_dead(pid)
+                    else:
+                        _untrack_pid(pid)
+                        _untrack_session_pid(pid)
                     unregister_protected_pid(pid)
                 except Exception:
                     logger.debug("AcpRuntime: PID untracking failed for %s", pid, exc_info=True)
@@ -4952,6 +5016,25 @@ class AcpRuntime:
                 queue.put_nowait(None)  # poison sentinel
             except asyncio.QueueFull:
                 pass
+
+    async def _reap_after_cancelled_tracking(self, tracking: asyncio.Future[None]) -> None:
+        """Let the tracking worker finish, then reap the child. Never raises.
+
+        Run as its own task by the spawn cancellation guard, which shields it,
+        so a cancellation aimed at the spawn cannot interrupt either step.
+        ``asyncio.wait`` neither cancels *tracking* nor raises its exception; its
+        outcome does not matter here, only that it is over before the untrack
+        the reap performs.
+        """
+        await asyncio.wait({tracking})
+        try:
+            await self.kill(reason="reap after cancelled spawn tracking")
+        except Exception:
+            logger.debug(
+                "AcpRuntime: kill after cancelled PID tracking failed for %s",
+                self._pid,
+                exc_info=True,
+            )
 
     async def _retire_tracking_after_exit(self) -> None:
         """Drop this root's registry entries once its exit is CONFIRMED, not inferred.

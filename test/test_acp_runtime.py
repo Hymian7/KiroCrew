@@ -5905,6 +5905,71 @@ class TestAcpRuntimePidTracking:
         assert calls["session"] == [4242]
 
     @pytest.mark.asyncio
+    async def test_kill_retires_by_identity_when_a_spawn_token_is_held(self, monkeypatch):
+        """The reap proved THIS process dead, not that its number is still ours:
+        a root spawned since can already hold it. So the kill path retires the
+        line that names this process (the token read at spawn), never the lines
+        that merely carry the number."""
+        rt, _, proc = _make_runtime()
+        proc.wait = AsyncMock(return_value=0)
+        rt._spawn_start_token = "tok-a"
+
+        import kiro_crew.acp.runtime as rt_mod
+
+        if rt_mod.platform_compat.IS_WINDOWS:
+            pytest.skip("the Windows owned drain retires under its pin; covered separately")
+        identity_calls: list[tuple[int, str]] = []
+
+        def _by_identity(pid, token):
+            identity_calls.append((pid, token))
+            return True
+
+        def _never(*_a):
+            raise AssertionError("prefix-matched untrack ran although a token was held")
+
+        monkeypatch.setattr(rt_mod, "_untrack_root_by_identity", _by_identity)
+        monkeypatch.setattr(rt_mod, "_untrack_pid", _never)
+        monkeypatch.setattr(rt_mod, "_untrack_session_pid", _never)
+        monkeypatch.setattr(rt_mod, "_untrack_pid_if_dead", _never)
+        monkeypatch.setattr(rt_mod.platform_compat, "pid_exists", lambda pid: False)
+        monkeypatch.setattr(rt_mod.platform_compat, "kill_process_tree", lambda *a: None)
+
+        await rt.kill()
+
+        assert identity_calls == [(4242, "tok-a")]
+
+    @pytest.mark.asyncio
+    async def test_kill_clears_the_bare_line_only_while_dead_when_no_session_line_was_ours(
+        self, monkeypatch
+    ):
+        """Identity retirement found no line of ours (spawn's append failed, or a
+        successor already replaced it). The bare line still goes -- but through
+        the probe-under-lock helper, never by number alone."""
+        rt, _, proc = _make_runtime()
+        proc.wait = AsyncMock(return_value=0)
+        rt._spawn_start_token = "tok-a"
+
+        import kiro_crew.acp.runtime as rt_mod
+
+        if rt_mod.platform_compat.IS_WINDOWS:
+            pytest.skip("the Windows owned drain retires under its pin; covered separately")
+        if_dead_calls: list[int] = []
+
+        def _never(*_a):
+            raise AssertionError("prefix-matched untrack ran although a token was held")
+
+        monkeypatch.setattr(rt_mod, "_untrack_root_by_identity", lambda pid, token: False)
+        monkeypatch.setattr(rt_mod, "_untrack_pid_if_dead", lambda pid: if_dead_calls.append(pid))
+        monkeypatch.setattr(rt_mod, "_untrack_pid", _never)
+        monkeypatch.setattr(rt_mod, "_untrack_session_pid", _never)
+        monkeypatch.setattr(rt_mod.platform_compat, "pid_exists", lambda pid: False)
+        monkeypatch.setattr(rt_mod.platform_compat, "kill_process_tree", lambda *a: None)
+
+        await rt.kill()
+
+        assert if_dead_calls == [4242]
+
+    @pytest.mark.asyncio
     async def test_kill_keeps_pid_tracked_when_the_process_survives(self, monkeypatch):
         """A survivor must STAY tracked so the orphan sweeps can still reach it.
 
