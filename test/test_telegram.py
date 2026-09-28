@@ -27,7 +27,11 @@ from kiro_crew.acp.client import AcpError
 from kiro_crew.acp.types import EVENT_COMPACTION_STATUS, EVENT_COMPLETE, EVENT_TEXT_CHUNK
 from kiro_crew.dashboard.token_auth import parse_duration
 from kiro_crew.messaging.commands import parse_dashboard_ttl
-from kiro_crew.messaging.display_safety import canonicalize_display, joins_to_a_credential
+from kiro_crew.messaging.display_safety import (
+    canonicalize_display,
+    joins_to_a_credential,
+    severs_a_credential,
+)
 from kiro_crew.messaging.link import (
     UNBIND_REASON_UNSPECIFIED,
     ChannelLink,
@@ -6275,6 +6279,55 @@ class TestRotationSeamCredentialSafety:
         r._buf = [raw]
         asyncio.run(r._rotate_on_length())
         assert cli.sent, "the rotation withheld on an offset it could have taken"
+
+    def _three_piece_rule_source(self) -> str:
+        """A prefix the splitter cuts into three pieces, raw-clean, shown-severing.
+
+        The rules are LONG on purpose. A short ``---`` leaves the middle fragment
+        packed into the same chunk as the last one, where the blank line between
+        them survives canonicalising and no key forms; a rule sized against the
+        budget is what puts the middle fragment in a chunk of its OWN, and
+        ``_strip_hr`` erases the rule on delivery so that chunk shows the fragment
+        alone. Measured, not assumed -- the precondition is asserted below.
+        """
+        bar = "-" * 120
+        pad = "a" * 330
+        return pad + "\nAKIAIOS\n\n" + bar + "\n\nFODNN7\n\n" + bar + "\n\nEXAMPLE\n" + "b" * 330
+
+    def test_the_held_image_prefix_is_graded_as_a_sequence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The upload-hold branch seals its whole prefix; it must grade it first.
+
+        That branch keeps the image reference and everything after it in the live
+        tail and seals every chunk before it, then returns -- ahead of the length
+        path's own delivered-form sequence grade. The two gradings that do run are
+        blind to this shape: the splitter reads the RAW pieces, where the rules
+        still stand between the fragments, and the seam repair reads the delivered
+        form but against ONE predecessor only. A key whose fragments sit across
+        three pieces separated by rules is clean in both, and flush on screen.
+        """
+        prefix = self._three_piece_rule_source()
+        chunks = _split_markdown_bounded(prefix, self._CAP)
+        assert len(chunks) >= 3, f"fixture did not reach three pieces: {len(chunks)}"
+        assert not severs_a_credential(
+            chunks, _default_redactor
+        ), "fixture no longer hides the key from the raw grade"
+        assert severs_a_credential(
+            chunks, _default_redactor, _delivered_form
+        ), "fixture no longer severs a key once delivered"
+
+        r, cli = self._renderer(monkeypatch)
+        monkeypatch.setattr(r, "_uploads_enabled", lambda: True)
+        r._buf = [prefix + "\n![shot](/tmp/shot.png)"]
+
+        asyncio.run(r._rotate_on_length())
+
+        assert r._buf and r._buf[0].lstrip().startswith(
+            "!["
+        ), f"the upload-hold branch was not taken: {r._buf!r}"
+        frames = [text for text, _kb in cli.sent]
+        self._assert_no_key_on_screen(frames)
 
     def test_a_markup_span_covering_a_whole_piece_is_caught(
         self, monkeypatch: pytest.MonkeyPatch

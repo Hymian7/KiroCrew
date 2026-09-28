@@ -1447,17 +1447,36 @@ class TelegramRenderer(Renderer):
                 if spans[0][0] == 0:
                     return  # the whole buffer is protected — do not rotate at all
                 held = raw[spans[0][0] :]
-                # No credential grade here, deliberately. ``held`` begins AT the ref
-                # span, so its first two characters are always ``![`` -- and ``!``
-                # survives canonicalising, standing between the sealed chunk's last
-                # character and anything the tail could contribute. Measured over
-                # alt-text, link-target, trailing-text and bare-adjacency shapes: no
-                # join reaches a credential pattern, so a gate here would be a gate
-                # on an unreachable boundary. The chunks among themselves are graded
-                # by the splitter, which redacts before choosing any boundary.
-                for chunk in await asyncio.to_thread(
-                    _split_markdown_bounded, raw[: spans[0][0]], rendered_cap
+                # The boundary between the last sealed chunk and ``held`` needs no
+                # grade, deliberately. ``held`` begins AT the ref span, so its first
+                # two characters are always ``![`` -- and ``!`` survives
+                # canonicalising, standing between the sealed chunk's last character
+                # and anything the tail could contribute. Measured over alt-text,
+                # link-target, trailing-text and bare-adjacency shapes: no join
+                # reaches a credential pattern, so a gate there would be a gate on an
+                # unreachable boundary.
+                #
+                # The boundaries AMONG the prefix chunks are a different matter. The
+                # splitter redacts before choosing one, but it reads the RAW pieces,
+                # where a horizontal rule still stands between two fragments; the
+                # seal strips rules, so the reader sees them flush. And the seam
+                # repair that does read the delivered form reads one predecessor
+                # only. A key whose fragments sit across three chunks separated by
+                # ``---`` is therefore clean in every reading that runs. Grade the
+                # prefix as a SEQUENCE in its delivered form, the same gate the
+                # length path below carries, and carve on it when it severs.
+                prefix = raw[: spans[0][0]]
+                chunks = await asyncio.to_thread(_split_markdown_bounded, prefix, rendered_cap)
+                if await asyncio.to_thread(
+                    severs_a_credential, chunks, _default_redactor, _delivered_form
                 ):
+                    carved = await self._carve_graded(prefix, limit, rendered_cap)
+                    if carved is None:
+                        # Deliver NOTHING: the whole buffer, reference included, rides
+                        # the next rotation and the semantic seal redacts it intact.
+                        return
+                    chunks = carved
+                for chunk in chunks:
                     self._buf = [chunk]
                     await self._seal_current(extract_uploads=False)
                     self._open_new_message()
@@ -1555,6 +1574,50 @@ class TelegramRenderer(Renderer):
             await self._seal_current(extract_uploads=False)
             self._open_new_message()
         self._buf = [(chunks[-1] if chunks else "") + protocol_suffix]
+
+    async def _carve_graded(self, source: str, limit: int, rendered_cap: int) -> list[str] | None:
+        """``source`` cut into pieces no reader can rejoin into a credential, or
+        ``None`` when no safe cut exists and the text must be withheld whole.
+
+        Every piece this returns is SEALED by the caller, with no rotation left
+        ahead of any of them, so the carve continues until the remainder fits the
+        budget rather than stopping at one offset. A piece left over the cap is
+        re-split by ``_seal_current`` on length alone, with no credential grade,
+        which is the cut this gate exists to close -- so taking a single offset
+        would buy ONE safe boundary by handing every later boundary in the same
+        text to an ungraded one.
+
+        Each step grades its head against the whole remainder, which is the
+        per-boundary reading ``severs_a_credential`` applies to the finished list.
+        That reading is still asked for once at the end: canonicalising DROPS a
+        link target, so markup spanning a middle piece can collapse two distant
+        pieces together in a way no single boundary check sees. The cost is
+        confined to text that already severs -- a prefix the splitter cut safely
+        never reaches here.
+        """
+        graded: list[str] = []
+        rest = source
+        while len(rest) > limit or await asyncio.to_thread(_rendered_len, rest) > rendered_cap:
+            budget = limit
+            while True:
+                offset = await asyncio.to_thread(
+                    safe_split_offset, rest, budget, _default_redactor, _delivered_form
+                )
+                if not offset:
+                    return None
+                head = rest[:offset]
+                worst = await asyncio.to_thread(_rendered_len, head)
+                if worst <= rendered_cap:
+                    break
+                if budget <= _MIN_SPLIT_LIMIT:
+                    return None
+                budget = _shrunk_limit(budget, rendered_cap, worst)
+            graded.append(head)
+            rest = rest[offset:]
+        chunks = [*graded, rest]
+        if await asyncio.to_thread(severs_a_credential, chunks, _default_redactor, _delivered_form):
+            return None
+        return chunks
 
     def _open_new_message(self) -> None:
         """Next render creates a fresh message instead of editing the old one."""

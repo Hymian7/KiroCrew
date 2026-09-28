@@ -269,6 +269,30 @@ class TestSeversACredential:
         assert not severs_a_credential(raw, _default_redactor)
         assert severs_a_credential(delivered, _default_redactor)
 
+    def test_a_key_completed_before_the_last_piece_is_caught(self) -> None:
+        """A RUN of messages, with a message after it that spoils the pattern.
+
+        The patterns anchor at their edges: this token's second segment is exactly
+        43 characters followed by ``(?![A-Za-z0-9_-])``, so ONE alphanumeric
+        character after it kills the match. The key is complete once the reader has
+        read messages 1 and 2; message 3 starts with a letter. Every reading that
+        runs to the END of the sequence therefore carries that letter and reports
+        clean -- the whole join, the per-piece join, and each suffix. Only the run
+        that STOPS at the second message sees the key, and on screen the reader has
+        a message break exactly there.
+        """
+        segment = "eyJ" + "".join("abcdefghi-"[index % 10] for index in range(96))
+        token = segment + "." + "".join("ABCDEFGHI-"[index % 10] for index in range(43))
+        assert _default_redactor(token) != token, "fixture is not a credential"
+
+        pieces = [token[:80], token[80:], "x"]
+        for piece in pieces:
+            assert _default_redactor(piece) == piece, "each piece alone must look clean"
+        whole = canonicalize_display("".join(pieces))
+        assert _default_redactor(whole) == whole, "fixture must escape the whole-join reading"
+
+        assert severs_a_credential(pieces, _default_redactor)
+
 
 class TestSafeSplitOffsetGradesTheDeliveredForm:
     """``present`` is what makes the returned offset one the caller can take.
@@ -340,3 +364,45 @@ class TestTheDeliveredReadingCatchesWhatAPreSplitRedactionCannot:
 def _strip_hr_then_strip(piece: str) -> str:
     """The Telegram seal's own transform, as the gate hands it to the grader."""
     return _strip_hr(piece).strip()
+
+
+class TestAnInteriorRunIsRead:
+    """A credential can sit with a spoiling message on EACH side of it.
+
+    Every whole, prefix and suffix reading of the sequence carries at least one of
+    those two frames, and the patterns anchor at both ends, so each of those
+    readings is spoiled and reports clean. The key is only visible in a reading
+    bounded on both sides -- an INTERIOR run -- which is why those are read too.
+
+    A rotation of model text makes both frames ordinary rather than crafted: the
+    splitter rstrips each chunk, so a chunk ending on a letter is the common case.
+    """
+
+    #: A link-spanning JWT. Its last segment is a FIXED 43 characters, which is what
+    #: makes an alphanumeric frame on the right genuinely spoil the match: a pattern
+    #: whose tail is open-ended just absorbs the frame and matches anyway, so a
+    #: variable-length token would be caught by a suffix reading and prove nothing.
+    _FIRST = "eyJ" + "abcdefghij" * 10
+    _LAST = "Z" * 43
+    #: Two interior pieces whose canonical join is that token: canonicalising DROPS a
+    #: link's target, so each label lands against the next one.
+    _INTERIOR = [f"[{_FIRST}](https://q/", f"aaa)[.{_LAST}](https://q/bbb)"]
+    _FRAME = "zzz"
+
+    def test_an_interior_run_between_two_spoiling_frames_is_read(self) -> None:
+        pieces = [self._FRAME, *self._INTERIOR, self._FRAME]
+
+        joined = canonicalize_display("".join(pieces))
+        assert _default_redactor(joined) == joined, "the frames no longer spoil the whole reading"
+        inner = canonicalize_display("".join(self._INTERIOR))
+        assert _default_redactor(inner) != inner, "the interior pieces no longer form a key"
+
+        assert severs_a_credential(pieces, _default_redactor), "the interior run was not read"
+
+    def test_the_same_run_unframed_is_still_caught(self) -> None:
+        """Control: the reading is added, not swapped for the ones already there."""
+        assert severs_a_credential(self._INTERIOR, _default_redactor)
+
+    def test_a_clean_sequence_of_many_pieces_stays_clean(self) -> None:
+        """Control: the windows refuse runs, they do not reject ordinary text."""
+        assert not severs_a_credential(["word " * 4 for _ in range(40)], _default_redactor)

@@ -79,7 +79,7 @@ from kiro_crew.discord.transport_dispatch import (
 )
 from kiro_crew.messaging import driver as messaging_driver
 from kiro_crew.messaging.attachments import cleanup
-from kiro_crew.messaging.display_safety import canonicalize_display
+from kiro_crew.messaging.display_safety import canonicalize_display, severs_a_credential
 from kiro_crew.messaging.link import (
     UNBIND_REASON_UNSPECIFIED,
     ChannelLink,
@@ -922,6 +922,14 @@ class TestRotationSplitting:
         assert offloads == [
             (renderer_module.protected_ref_spans, (source,), {}),
             (_capture, (source, 100), {}),
+            # The rotation grades the pair the splitter never sees -- the sealed
+            # chunks plus the tail it retains -- and that read is over
+            # attacker-influenced text, so it is offloaded like the two above it.
+            (
+                renderer_module.severs_a_credential,
+                ([source], renderer_module._redact_all, renderer_module._delivered_form),
+                {},
+            ),
         ]
 
     @pytest.mark.asyncio
@@ -6161,6 +6169,42 @@ class TestRotationSeamCredentialSafety:
             assert _redact_all(reading) == reading, f"key readable across frames: {frames}"
 
     @pytest.mark.asyncio
+    async def test_a_held_image_ref_cannot_be_re_delivered_as_the_rejected_pair(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The offset search grades the source; the rotation delivers source PLUS held.
+
+        An image reference starting at or before the budget leaves the sealable
+        source SHORTER than the budget, so the search takes its ``limit >= len(text)``
+        early return and hands back the whole string. Re-assigning the frames from
+        that answer reproduces the byte-identical pair the gate above just rejected,
+        and the reader sees the label ``![my-secret-value](...)`` canonicalises to
+        sitting straight under a dangling ``SecretAccessKey=``. So the search's answer
+        is a candidate, not a verdict: the delivered pair is graded again and the
+        rotation delivers nothing rather than the pair it already refused.
+        """
+        limit = 100
+        head = "prose " * 10 + "SecretAccessKey="
+        held = "![my-secret-value](/tmp/kc-13494-missing.png)"
+        src = head + held
+        assert len(src) > limit, "fixture does not rotate"
+        assert len(head) <= limit, "fixture does not reach the search's early return"
+        assert _redact_all(head) == head and _redact_all(held) == held, "fixture leaks alone"
+        assert severs_a_credential(
+            [head, held], _redact_all, _delivered_form
+        ), "fixture is not a straddle, so the rotation never consults the search"
+
+        r, cli = self._renderer(monkeypatch, limit)
+        r._buf = [src]
+        await r._rotate_on_length()
+
+        assert cli.sent == [], "the rotation delivered the pair the gate rejected"
+        assert "".join(r._buf) == src, "withheld text must ride the next rotation intact"
+
+        await r._seal_current(extract_uploads=False)
+        self._assert_no_key_on_screen([_delivered_form(t) for t, _ in cli.sent])
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(("head", "tail"), CREDENTIAL_STRADDLE_SHAPES)
     async def test_a_straddled_credential_never_reaches_two_frames(
         self, monkeypatch: pytest.MonkeyPatch, head: str, tail: str
@@ -6204,6 +6248,51 @@ class TestRotationSeamCredentialSafety:
 
         assert cli.sent == [], "text went out on a cut the grading had refused"
         assert "".join(r._buf) == src, "the withheld text was not kept whole"
+
+    @pytest.mark.asyncio
+    async def test_a_presentation_fallback_retains_no_piece_over_the_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A graded cut must not buy one safe boundary with every later one.
+
+        The presentation branch is TERMINAL: the piece it retains is parked as
+        ``_delivery_text`` with no further rotation ahead of it, and the only thing
+        that bounds it after that is ``_seal_current``'s own re-split -- which cuts
+        on length alone and grades no boundary. So a fallback that replaced the
+        splitter's bounded chunks with ``[head, whole remainder]`` moved the FIRST
+        boundary to safety and handed every later one in the same text to an
+        ungraded cut. The invariant is stated on the retained SIZE, which is what
+        makes it hold whatever the text is.
+
+        The sealed frames are deliberately not size-asserted: the seal redacts each
+        one, and the replacement text is longer than the key it covers, so a frame
+        legitimately ends up wider than the budget. That growth is the protection
+        working, not a boundary escaping.
+        """
+        head, tail = "AKIAIOSF", "ODNN7EXAMPLE"
+        # One unbroken word, so the splitter cuts hard at the budget and the first
+        # cut lands inside the credential. Several budgets wide, so a single graded
+        # offset would leave a remainder many times the budget.
+        src = "a" * (self._LIMIT - len(head)) + head + tail + "b" * (self._LIMIT * 6)
+        assert severs_a_credential(
+            await asyncio.to_thread(split_markdown_safe, src, self._LIMIT),
+            _redact_all,
+            _delivered_form,
+        ), "fixture does not sever, so it never reaches the graded fallback"
+
+        r, cli = self._renderer(monkeypatch, self._LIMIT)
+        r._delivery_text = src
+        await r._rotate_on_length()
+
+        retained = r._delivery_text or ""
+        assert len(cli.sent) > 1, "one frame only, so the fallback carved nothing"
+        assert len(retained) <= self._LIMIT, (
+            f"a {len(retained)}-char piece is retained against a {self._LIMIT} budget; "
+            "the seal's own re-split is the next cut and it grades no boundary"
+        )
+
+        await r._seal_current(extract_uploads=False)
+        self._assert_no_key_on_screen([_delivered_form(t) for t, _ in cli.sent])
 
         await r._seal_current(extract_uploads=False)
         delivered = "".join(text for text, _ in cli.sent)
@@ -6273,3 +6362,47 @@ class TestRotationSeamCredentialSafety:
         await r._rotate_on_length()
         await r._seal_current(extract_uploads=False)
         self._assert_no_key_on_screen([text for text, _ in cli.sent])
+
+    @pytest.mark.asyncio
+    async def test_the_seals_own_split_grades_its_boundary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The last cut before the wire is the one nothing rotates behind.
+
+        A buffer the rotation WITHHELD as unsafe is parked whole, so it arrives at
+        the seal over the platform cap. The seal splits it again -- and that cut had
+        no redactor, where Telegram's own splitter call has carried one all along. So
+        the gate that refused to cut handed the same text to a cut made on length
+        alone, and a key the markup spans is severed there instead.
+
+        The link target is a long run with no space in it, which is what makes the
+        cut land inside the credential rather than at a break the splitter prefers.
+        """
+        # The key lives in the link TARGET behind an innocuous label, broken by a run
+        # of ``*``. Neither whole-text reading sees it: canonicalising collapses the
+        # link to its label, and the literal form has the run between the halves. So
+        # the seal's own redaction finds nothing and the text arrives at the split
+        # intact. Canonicalising each delivered frame DROPS the emphasis run, which
+        # is what puts the halves flush once the cut lands inside it.
+        src = (
+            "a" * (DISCORD_MAX_TEXT - 100)
+            + "[l](https://x/AKIA"
+            + "*" * 300
+            + "IOSFODNN7EXAMPLE)"
+            + "b" * 400
+        )
+        assert len(src) > DISCORD_MAX_TEXT, "fixture does not reach the platform cap"
+        assert (
+            discord_renderer._redact_transformed(src) == src
+        ), "the seal's own redaction already catches it"
+        assert severs_a_credential(
+            split_markdown_safe(src, DISCORD_MAX_TEXT), _redact_all, _delivered_form
+        ), "an ungraded split of this fixture no longer severs"
+
+        r, cli = self._renderer(monkeypatch, self._LIMIT)
+        r._buf = [src]
+        await r._seal_current(extract_uploads=False)
+
+        frames = [text for text, _ in cli.sent]
+        assert len(frames) >= 2, f"fixture did not split at the seal: {len(frames)}"
+        self._assert_no_key_on_screen(frames)
