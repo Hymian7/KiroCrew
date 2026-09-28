@@ -3892,7 +3892,7 @@ its author can make. Absent or malformed, the field means inject.
 
 The `false` value carries no new privilege surface: it can only reduce what a
 skill delivers, and foreign-imported skills are refused for declaring `triggers`
-at all (`onboarding_import.py`), so an import cannot reach either path.
+at all (`_skill_package` in `onboarding_scan.py`), so an import cannot reach either path.
 
 **Disabled-app skill gating.** When an app is disabled (`_disabled_app_names()`),
 its bundled skills are withheld across all user-facing surfaces: trigger matching
