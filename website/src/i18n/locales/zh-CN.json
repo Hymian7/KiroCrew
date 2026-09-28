@@ -5987,6 +5987,7 @@
       "show_pending_tool_call_in_chat": "在聊天中显示待处理的工具调用",
       "skill": "技能",
       "slash_commands": "斜杠命令",
+      "spawn_pending_other": "{{count}} 个子代理待处理 — 请见下方操作栏",
       "steer": "引导",
       "alt_action_hint_queues": "{{chord}} 改为将这条消息排队",
       "alt_action_hint_steers": "{{chord}} 改为用这条消息立即引导",

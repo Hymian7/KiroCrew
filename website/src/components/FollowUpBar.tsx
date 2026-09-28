@@ -3,6 +3,7 @@ import { useScrollEdges } from '../hooks/useScrollEdges'
 import { ChevronLeft, ChevronRight, ArrowUp, Loader2 } from 'lucide-react'
 import { InstantTip, useInstantTip as useSharedInstantTip } from './InstantTip'
 import ErrorNotice from './ErrorNotice'
+import { Glass } from './Glass'
 
 import { i18nT } from '../i18n/t'
 import { useLanguageGeneration } from '../i18n/useLanguageGeneration'
@@ -171,18 +172,24 @@ function chipEntrance(index: number, animating: boolean): { className: string, s
 // at equal specificity Tailwind's emission order wins, not attribute order
 // (`src/test/narrowFirstBaseline.test.ts`), and `cursor-default` is emitted
 // first, so the pointer hand would survive the whole pending state.
-const CHIP_BASE = 'px-3 py-1.5 mc-message-font-chip text-left leading-snug transition-all border'
+// `border-transparent`: the chip keeps its 1px box (the split chip's seam and the
+// picked / unpicked swap stay layout-stable) but the glass draws no outline of its
+// own — the material has none, the tint and the light bands are the boundary.
+const CHIP_BASE = 'px-3 py-1.5 mc-message-font-chip text-left leading-snug transition-all border border-transparent'
 
-// Every chip is its own Liquid Glass pill (`.glass-pane`, index.css): the same
-// tint, edge and top/bottom light as the composer, so the transcript blurs
-// through the chips the way it does through the box beneath them. A picked chip
-// mixes the accent INTO the glass (`glass-pane-accent`) instead of swapping to
-// an opaque wash, so it stays the same material.
+// Every chip is its own Liquid Glass pill — the SAME primitive as the composer
+// (components/Glass.tsx, `chip` variant), rendered AS the button (`as`), so the
+// transcript blurs and bends through the chips the way it does through the box
+// beneath them. A picked chip mixes the accent INTO the glass (`glass-accent`)
+// instead of swapping to an opaque wash, so it stays the same material; an
+// unpicked one brightens a step on hover (`glass-hover`).
 function chipColors(isPicked: boolean) {
   return isPicked
-    ? 'glass-pane glass-pane-accent text-accent'
-    : 'glass-pane glass-pane-hover text-muted hover:text-text'
+    ? 'glass-accent text-accent'
+    : 'glass-hover text-muted hover:text-text'
 }
+/** Every chip pill is rounded 8px (`rounded-lg`); the pane's radius says the same. */
+const CHIP_RADIUS = 8
 
 /** Standalone chip: the flex item itself, so it owns the width cap (and, in the
  *  scroll layout, `shrink-0` so it does not collapse). Fully rounded. */
@@ -405,7 +412,11 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
   if (!useDebouncedClick) {
     return (
       <>
-        <button
+        {/* The chip IS the glass pane here too (see the standalone chip below). */}
+        <Glass
+          as="button"
+          variant="chip"
+          radius={CHIP_RADIUS}
           type="button"
           aria-disabled={pending || dimmed || undefined}
           aria-busy={pending || undefined}
@@ -422,7 +433,7 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
           {...tipHandlers}
         >
           <ChipLabel option={option} busy={pending} />
-        </button>
+        </Glass>
         {tipNode}
       </>
     )
@@ -475,24 +486,33 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
   // passed-in `className` (cap + rounding + per-layout shrink) unchanged.
   const mainChipClassName = showSendSegment ? `${splitMainChipClassName(isPicked)}${chipCursorClass(!!pending || !!dimmed)}` : `${className} ${entrance.className}${stateClass}`
 
-  const mainChip = (
-    <button
-      type="button"
-      // Keep keyboard focus in the textarea on click. Without this the chip
-      // takes focus, and a follow-up Enter re-activates this (now picked) chip,
-      // running the toggle-off branch that deletes the composed input ("the
-      // prompt clears"). Deliberate keyboard (tab) activation still toggles.
-      aria-disabled={pending || dimmed || undefined}
-      aria-busy={pending || undefined}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={handleClick}
-      onDoubleClick={handleImmediateSend}
-      className={mainChipClassName}
-      style={showSendSegment ? undefined : entrance.style}
-      {...tipHandlers}
-    >
-      <ChipLabel option={option} busy={pending} />
-    </button>
+  const chipProps = {
+    type: 'button' as const,
+    // Keep keyboard focus in the textarea on click. Without this the chip
+    // takes focus, and a follow-up Enter re-activates this (now picked) chip,
+    // running the toggle-off branch that deletes the composed input ("the
+    // prompt clears"). Deliberate keyboard (tab) activation still toggles.
+    'aria-disabled': pending || dimmed || undefined,
+    'aria-busy': pending || undefined,
+    onMouseDown: (e: React.MouseEvent) => e.preventDefault(),
+    onClick: handleClick,
+    onDoubleClick: handleImmediateSend,
+    className: mainChipClassName,
+    ...tipHandlers,
+  }
+  const label = <ChipLabel option={option} busy={pending} />
+
+  // The standalone chip IS the glass pane (`Glass as="button"`): one element is
+  // the flex item, the width cap, the entrance animation and the control, and
+  // the pane's layers sit inside it under the label. Inside a split chip the
+  // WRAPPER is the pane and this button sits on it transparent, so it is a plain
+  // button there.
+  const mainChip = showSendSegment ? (
+    <button {...chipProps}>{label}</button>
+  ) : (
+    <Glass as="button" variant="chip" radius={CHIP_RADIUS} {...chipProps} style={entrance.style}>
+      {label}
+    </Glass>
   )
 
   if (!showSendSegment) return <>{mainChip}{tipNode}</>
@@ -504,7 +524,8 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
     // cannot resolve against an indefinite wrapper), leaving a wide empty gap
     // before the next chip. On the flex item the percentage resolves against
     // the strip's definite width.
-    <span className={`inline-flex items-stretch shrink-0 ${CHIP_MAX_WIDTH} ${splitWrapperClassName(isPicked)} ${entrance.className}${stateClass}`} style={entrance.style}>
+    // The wrapper is the glass pane here: the two buttons on it stay transparent.
+    <Glass as="span" variant="chip" radius={CHIP_RADIUS} className={`inline-flex items-stretch shrink-0 ${CHIP_MAX_WIDTH} ${splitWrapperClassName(isPicked)} ${entrance.className}${stateClass}`} style={entrance.style}>
       {mainChip}
       <button
         type="button"
@@ -518,7 +539,7 @@ function Chip({ option, isPicked, picked, quickSend, onSelect, onSend, className
         <ArrowUp size={13} />
       </button>
       {tipNode}
-    </span>
+    </Glass>
   )
 }
 

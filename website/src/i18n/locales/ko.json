@@ -5987,6 +5987,7 @@
       "show_pending_tool_call_in_chat": "대기 중인 도구 호출을 채팅에 표시",
       "skill": "스킬",
       "slash_commands": "슬래시 명령",
+      "spawn_pending_other": "하위 에이전트 {{count}}개 대기 중 — 아래 표시줄 참조",
       "steer": "방향 지시",
       "alt_action_hint_queues": "{{chord}}(으)로 이 메시지를 대기열에 넣기",
       "alt_action_hint_steers": "{{chord}}(으)로 이 메시지를 바로 조정에 쓰기",

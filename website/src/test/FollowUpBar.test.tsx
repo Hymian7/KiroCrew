@@ -46,16 +46,18 @@ describe('FollowUpBar', () => {
       render(<FollowUpBar options={['Picked', 'Unpicked']} picked={new Set(['Picked'])} onSelect={() => {}} />)
       const pickedBtn = screen.getByRole('button', { name: 'Picked' })
       const unpickedBtn = screen.getByRole('button', { name: 'Unpicked' })
-      // Glass pill: the accent is mixed INTO the material (`glass-pane-accent`,
-      // which also carries the accent edge) rather than an opaque wash.
-      expect(pickedBtn.className).toContain('glass-pane-accent')
+      // Glass pill: the button IS the Liquid Glass pane (components/Glass.tsx
+      // rendered as the button), and the accent is mixed INTO the material
+      // (`glass-accent`) rather than an opaque wash.
+      expect(pickedBtn.className).toContain('liquid-glass')
+      expect(pickedBtn.className).toContain('glass-accent')
       expect(pickedBtn.className).toContain('text-accent')
       fireEvent.focus(pickedBtn)
       expect(screen.getByRole('tooltip').textContent).toMatch(/remove/i)
       fireEvent.blur(pickedBtn)
       expect(unpickedBtn.className).toContain('text-muted')
-      expect(unpickedBtn.className).toContain('glass-pane')
-      expect(unpickedBtn.className).not.toContain('glass-pane-accent')
+      expect(unpickedBtn.className).toContain('liquid-glass')
+      expect(unpickedBtn.className).not.toContain('glass-accent')
       fireEvent.focus(unpickedBtn)
       expect(screen.getByRole('tooltip').textContent).toMatch(/add to input/i)
       fireEvent.blur(unpickedBtn)
@@ -70,7 +72,7 @@ describe('FollowUpBar', () => {
       fireEvent.click(btn)
       expect(btn.className).toContain('text-muted')
       rerender(<FollowUpBar options={['X']} picked={new Set(['X'])} onSelect={() => {}} />)
-      expect(screen.getByRole('button', { name: 'X' }).className).toContain('glass-pane-accent')
+      expect(screen.getByRole('button', { name: 'X' }).className).toContain('glass-accent')
     })
   })
 
@@ -286,6 +288,10 @@ describe('FollowUpBar', () => {
   // own text out of the visible box.
   describe('long option labels', () => {
     const LONG = 'Implement blockers 3 & 4 plus the safe follow-ups and push, but leave blocker 1 (team access) and blocker 2 (CI) for me to handle myself'
+    // The chip IS a Glass host (components/Glass.tsx): its first <span>s are the
+    // material layers (empty), so the label is the leaf span carrying the text.
+    const labelSpan = (chip: HTMLElement) =>
+      [...chip.querySelectorAll('span')].find(s => s.children.length === 0 && s.textContent === chip.textContent)
 
     it('caps chip width and clamps the label in the scroll layout', () => {
       render(<FollowUpBar options={[LONG]} picked={new Set()} onSelect={() => {}} layout="scroll" />)
@@ -293,7 +299,7 @@ describe('FollowUpBar', () => {
       expect(chip.className).toContain('followup-chip')
       // The clamp must sit on an unpadded inner element, not on the padded
       // button — otherwise a sliver of the next line shows in the padding.
-      const label = chip.querySelector('span')
+      const label = labelSpan(chip)
       expect(label?.className).toContain('truncate')
       expect(label?.className).toContain('block')
       expect(chip.className).not.toContain('truncate')
@@ -385,7 +391,7 @@ describe('FollowUpBar', () => {
       render(<FollowUpBar options={[LONG]} picked={new Set()} onSelect={() => {}} />)
       const chip = screen.getByRole('button', { name: LONG })
       expect(chip.className).toContain('followup-chip')
-      expect(chip.querySelector('span')?.className).toContain('truncate')
+      expect(labelSpan(chip)?.className).toContain('truncate')
     })
 
     it('clamps to ONE line so a long label cannot make its chip taller than its neighbours', () => {
@@ -398,7 +404,7 @@ describe('FollowUpBar', () => {
           <FollowUpBar options={[LONG, 'Ship it']} picked={new Set()} onSelect={() => {}} onSend={() => {}} layout={layout} />,
         )
         for (const label of [LONG, 'Ship it']) {
-          const span = screen.getByRole('button', { name: label }).querySelector('span')
+          const span = labelSpan(screen.getByRole('button', { name: label }))
           expect(span?.className).toContain('truncate')
           expect(span?.className).not.toContain('line-clamp-2')
         }

@@ -5987,6 +5987,7 @@
       "show_pending_tool_call_in_chat": "チャットで保留中のツール呼び出しを表示",
       "skill": "スキル",
       "slash_commands": "スラッシュコマンド",
+      "spawn_pending_other": "サブエージェント {{count}} 件が待機中 — 下のバーを参照",
       "steer": "指示を追加",
       "alt_action_hint_queues": "{{chord}} でこのメッセージをキューに入れる",
       "alt_action_hint_steers": "{{chord}} でこのメッセージで今すぐステアする",

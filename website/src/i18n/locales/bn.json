@@ -6084,6 +6084,8 @@
       "show_pending_tool_call_in_chat": "অপেক্ষমাণ টুল কল চ্যাটে দেখান",
       "skill": "স্কিল",
       "slash_commands": "স্ল্যাশ কমান্ড",
+      "spawn_pending_one": "{{count}}টি সাব-এজেন্ট অপেক্ষমাণ — নিচের বার দেখো",
+      "spawn_pending_other": "{{count}}টি সাব-এজেন্ট অপেক্ষমাণ — নিচের বার দেখো",
       "steer": "স্টিয়ার",
       "alt_action_hint_queues": "{{chord}} এই বার্তাটি বরং কিউতে রাখে",
       "alt_action_hint_steers": "{{chord}} এই বার্তা দিয়ে বরং এখনই স্টিয়ার করে",

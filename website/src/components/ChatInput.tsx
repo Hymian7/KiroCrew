@@ -3775,7 +3775,13 @@ function ChatInput({
        *  own button. Plain glass, not the warn tint the tool-approval pane
        *  below wears: when both are up, two warn panes in one band read as ONE
        *  request (UX review of 76851c90 -- "I'd fear double-approving"), and
-       *  this card's Bot framing and pulse already say what it is. */}
+       *  this card's Bot framing and pulse already say what it is.
+       *  While the tool-approval bar below is ALSO pending, this card keeps its
+       *  count and "Review in panel" but withholds Approve/Reject and its glow:
+       *  one set of decision buttons on screen at a time, so a reader cannot
+       *  take the two panes for one request and wonder whether a click answers
+       *  half of it (UX review of 21b8e79b). The buttons return the moment the
+       *  tool decision lands; the Subagents tab can resolve the spawn meanwhile. */}
       <AnimatePresence>
         {pendingSpawnApprovals.length > 0 && (
           <motion.div
@@ -3784,20 +3790,42 @@ function ChatInput({
             exit={{ opacity: 0, y: 8 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300, mass: 0.8 }}
           >
-            <Glass variant="chip" radius={16} className="w-full mb-2 approval-glow">
+            <Glass variant="chip" radius={16} className={`w-full mb-2${hasApproval ? '' : ' approval-glow'}`} data-testid="spawn-approval-card">
               <div className="flex items-center gap-1.5 px-3.5 py-2.5 select-none flex-wrap">
                 <Bot size={13} className="text-warn shrink-0" />
                 <span className="text-[13px] font-body text-muted flex-1 min-w-0">
-                  {pendingSpawnApprovals.length === 1
-                    ? '1 sub-agent is awaiting your approval to run'
-                    : `${pendingSpawnApprovals.length} sub-agents are awaiting your approval to run`}
+                  {/* While the tool approval bar is up, the decision lives THERE
+                   *  (the spawn's own permission row is what holds the bar), so
+                   *  this line must not point at itself as the thing to approve:
+                   *  it names the count and defers to the panel link. */}
+                  {hasApproval
+                    ? i18nT('components.chatInput.spawn_pending', { count: pendingSpawnApprovals.length })
+                    : pendingSpawnApprovals.length === 1
+                      ? '1 sub-agent is awaiting your approval to run'
+                      : `${pendingSpawnApprovals.length} sub-agents are awaiting your approval to run`}
                 </span>
+                {/* The action area swaps between three forms (resolving / panel
+                 *  link only / Approve + Reject) as the tool bar comes and goes;
+                 *  `mode="wait"` fades one out before the next fades in, so the
+                 *  swap reads as the same slot changing state, not a new control
+                 *  appearing from nowhere. */}
+                <AnimatePresence mode="wait" initial={false}>
                 {spawnApprovalsResolving ? (
-                  <span className="inline-flex items-center gap-1 text-[12px] text-muted/60 shrink-0">
+                  <motion.span key="resolving" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="inline-flex items-center gap-1 text-[12px] text-muted/60 shrink-0">
                     <Loader2 size={12} className="animate-spin shrink-0" />{i18nT('components.chatInput.resolving')}
-                  </span>
+                  </motion.span>
+                ) : hasApproval ? (
+                  <motion.button
+                    key="panel-only"
+                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}
+                    type="button"
+                    onClick={reviewSpawnApprovals}
+                    className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-text shrink-0 cursor-pointer bg-transparent border-none px-1"
+                  >
+                    <Target size={11} className="shrink-0" />{i18nT('components.chatInput.review_in_panel')}
+                  </motion.button>
                 ) : (
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <motion.div key="decide" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={() => resolveSpawnApprovals('approve')}
@@ -3821,13 +3849,14 @@ function ChatInput({
                     >
                       <Target size={11} className="shrink-0" />{i18nT('components.chatInput.review_in_panel')}
                     </button>
-                  </div>
+                  </motion.div>
                 )}
+                </AnimatePresence>
               </div>
               {/* Per-agent rows — only when more than one is pending, so a single
                *  spawn stays a compact one-liner. Each row resolves just its own
                *  sub-agent via resolveOneSpawn. */}
-              {pendingSpawnApprovals.length > 1 && (
+              {pendingSpawnApprovals.length > 1 && !hasApproval && (
                 <div className="px-3.5 pb-2.5 flex flex-col gap-1.5">
                   {pendingSpawnApprovals.map(a => (
                     <div key={a.id} className="flex items-center gap-2 rounded-lg border border-border/60 bg-bg/40 px-2.5 py-1.5">

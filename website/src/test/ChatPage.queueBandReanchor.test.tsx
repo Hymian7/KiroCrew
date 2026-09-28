@@ -21,8 +21,8 @@ import { resolve } from 'node:path'
  * every layout step of the animation, each one re-anchoring while FOLLOW holds,
  * so the final write always follows the last height change instead of racing it.
  *
- * Asserted against SOURCE TEXT like the two neighbouring mask guards
- * (fadeClearance, statusStackAboveMask): the invariant is the wiring between
+ * Asserted against SOURCE TEXT like the two neighbouring dock guards
+ * (dockClearance, statusStackLayering): the invariant is the wiring between
  * a JSX attribute, a callback ref, and the observer body — none of which jsdom
  * can exercise (happy-dom has no layout, so a real ResizeObserver never fires).
  *
@@ -39,7 +39,7 @@ const TRANSCRIPT_CONTROLLER = readFileSync(
 
 describe('composer status stack re-anchors the transcript while it resizes', () => {
   it('the stack wrapper carries the observer ref', () => {
-    // The ref must sit on the SAME element statusStackAboveMask pins as the
+    // The ref must sit on the SAME element statusStackLayering pins as the
     // stack wrapper — observing anything narrower (one child) goes blind when
     // a different band mounts.
     expect(CHAT_PAGE).toMatch(

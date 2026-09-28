@@ -6084,6 +6084,8 @@
       "show_pending_tool_call_in_chat": "Ausstehenden Werkzeugaufruf im Chat anzeigen",
       "skill": "Skill",
       "slash_commands": "Slash-Befehle",
+      "spawn_pending_one": "{{count}} Unteragent wartet — siehe Leiste unten",
+      "spawn_pending_other": "{{count}} Unteragenten warten — siehe Leiste unten",
       "steer": "Steuern",
       "alt_action_hint_queues": "{{chord}} reiht diese Nachricht stattdessen ein",
       "alt_action_hint_steers": "{{chord}} steuert stattdessen sofort mit dieser Nachricht",

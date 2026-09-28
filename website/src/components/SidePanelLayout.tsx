@@ -501,10 +501,10 @@ export default function SidePanelLayout({ title, tabs, defaultTab, rememberKey, 
               style={keyboardInset > 0 ? { transform: `translateY(-${keyboardInset}px)` } : undefined}
             >
               {/* Liquid Glass capsule: the shared recipe (components/Glass.tsx) with the
-                * composer's halo for depth and its accent glow on focus-within. The
-                * capsule IS the focusable control, so its hairline turns accent too:
-                * the glow alone is too faint to read as a focus cue on a light page. */}
-              <Glass radius={24} className="composer-halo focus-within:border-accent pointer-events-auto mx-auto max-w-sm">
+                * neutral rest shadow. No accent on focus: the theme-colored glow is the
+                * session composer's own cue, the material never lights up; here focus
+                * deepens the shadow one step (`.glass-shadow:focus-within`). */}
+              <Glass radius={24} className="glass-shadow pointer-events-auto mx-auto max-w-sm">
                 <SidePanelDockContext.Provider value="bottom-float">
                   {headerRight}
                 </SidePanelDockContext.Provider>

@@ -6084,6 +6084,8 @@
       "show_pending_tool_call_in_chat": "लंबित टूल कॉल चैट में दिखाएँ",
       "skill": "स्किल",
       "slash_commands": "स्लैश कमांड",
+      "spawn_pending_one": "{{count}} सब-एजेंट इंतज़ार में — नीचे बार देखो",
+      "spawn_pending_other": "{{count}} सब-एजेंट इंतज़ार में — नीचे बार देखो",
       "steer": "स्टीयर करें",
       "alt_action_hint_queues": "{{chord}} इस संदेश को इसके बजाय क्यू में डालता है",
       "alt_action_hint_steers": "{{chord}} इस संदेश से इसके बजाय तुरंत स्टीयर करता है",

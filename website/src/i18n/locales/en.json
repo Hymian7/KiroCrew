@@ -4303,6 +4303,8 @@
       "show_pending_tool_call_in_chat": "Show pending tool call in chat",
       "skill": "Skill",
       "slash_commands": "Slash commands",
+      "spawn_pending_one": "{{count}} sub-agent pending — see the bar below",
+      "spawn_pending_other": "{{count}} sub-agents pending — see the bar below",
       "stop_generation": "Stop generation",
       "stopping": "Stopping…",
       "stopping_2": "Stopping",

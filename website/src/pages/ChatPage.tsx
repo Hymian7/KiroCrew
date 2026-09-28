@@ -185,47 +185,27 @@ const REAL_GESTURE_AUTH_MS = 20000
 /**
  * Height of the transcript's tail spacer, in px.
  *
- * This plus the scroller's own `paddingBottom` is the clearance between the last
- * line of the transcript and the fade band below it, so it MUST stay >= that
- * band's height (`h-3`, 12px) or the fade slices the last line and the sliced
- * glyphs read as a hairline seam above the composer. It is a px value and not
- * `vh` for exactly that reason: as `2vh` the clearance tracked the viewport and
- * the margin was one pixel at 844px tall, so every shorter viewport — i.e. every
- * phone — landed inside the band.
+ * This plus the scroller's own dock clearance is the gap between the last line of
+ * the transcript and the top of the composer dock when the reader is at the
+ * bottom. It is a px value and not `vh` on purpose: as `2vh` the clearance tracked
+ * the viewport and the margin was one pixel at 844px tall, so every shorter
+ * viewport — i.e. every phone — landed the last line under the dock.
  */
 const TRANSCRIPT_TAIL_SPACER_PX = 16
 
 /**
- * How far the transcript's bottom mask reaches ABOVE the scrollport's bottom edge,
- * in px. This is the part that does the actual feathering, because it is the only
- * part that overlaps readable content, so `TRANSCRIPT_TAIL_SPACER_PX` plus the
- * scroller's own `paddingBottom` must stay >= this or the mask slices the last line
- * when the user is at the bottom.
- */
-const TRANSCRIPT_MASK_ABOVE_PX = 16
-
-/**
- * How far that same mask reaches BELOW the scrollport's bottom edge, so it ends
- * flush against the composer box instead of stopping short and leaving a strip
- * where a hairline shows through.
+ * Breathing room, in px, between the composer dock's top edge and the last line of
+ * the transcript, on top of the dock's own measured height.
  *
- * It is the exact distance from the scrollport's bottom edge to the top of the
- * composer box, which `ChatInput` owns as two pieces: the `input-area`'s own `pt-1`
- * (4px) plus the composer's top spacer (`h-[6px]`, the box that replaced the
- * pointer-only drag handle). Overshooting FURTHER is not harmless — the mask is
- * `z-[1]` and the composer sits in a later auto-z sibling, so any excess paints over
- * the box's own top border and dims it.
- *
- * That distance only holds while the composer status stack is EMPTY. When any status
- * bar renders, IT is what occupies the strip, and the mask's opaque tail landed on the
- * bar's top 10px instead — shaving its top border, both top corners and the first
- * line's ascenders, which reads as the bar being clipped by the UI. So every child of
- * the stack is positioned above `z-[1]` (the bars at `z-[2]`, the sub-agent wave chip
- * already at `z-[46]`); the tail then paints harmlessly BEHIND the topmost bar, whose
- * own box is what sits flush under the transcript. `ChatPage.statusStackAboveMask`
- * pins that ordering, and pins the child list so a new bar cannot forget it.
+ * The transcript scroller runs the full height of the pane and the dock floats
+ * over its bottom edge (iOS toolbar layout), so the scroller's `paddingBottom` is
+ * `dockH + this`: exactly the strip the dock covers, plus this margin, so the last
+ * line stops clear of the glass instead of under it. There is no opaque fade band
+ * between the two any more — the transcript scrolls under the glass and the
+ * material's own blur and tint are what keep the dock legible over it.
+ * ChatPage.dockClearance.test.tsx pins the wiring.
  */
-const COMPOSER_MASK_OVERSHOOT_PX = 10
+const DOCK_CLEARANCE_PX = 16
 /**
  * Strip of screen the mobile sessions drawer deliberately leaves uncovered, so a
  * sliver of the conversation behind it stays visible.
@@ -4445,6 +4425,45 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
   // transcriptRenderers.tsx `lastErrorIndex`.)
 
   const inputAreaRef = useRef<HTMLDivElement>(null)
+  // The composer dock floats over the bottom of the transcript scroller, so the
+  // scroller has to be told how much of its bottom edge is covered. Measured
+  // rather than summed from parts: the dock's height is whatever the status
+  // stack, the follow-up chips, the approval bar and the composer's own growth
+  // add up to at this instant, and every one of those changes independently.
+  // A callback ref, not a mount effect: the dock lives inside the pane's
+  // conditional branch, so a `[]` effect can run before it exists and never
+  // look again. The ref fires in the commit phase each time the box mounts or
+  // unmounts, and its synchronous setState lands before paint — the first
+  // painted frame already carries the right padding, where an effect-timed
+  // measurement paints one frame with the last line under the glass, then jumps.
+  const [dockH, setDockH] = useState(0)
+  // The scroller reserves a `scrollbar-gutter: stable` column on its right, and
+  // its rows are centred in the content box that EXCLUDES that column. The dock
+  // is inset by the same width, so its column lines up with the transcript's and
+  // the thumb stays uncovered down to the pane's bottom edge. Measured, not the
+  // 6px the stylesheet asks for: an engine that ignores `::-webkit-scrollbar`
+  // reserves its own width.
+  const [dockGutter, setDockGutter] = useState(0)
+  const dockObserverRef = useRef<ResizeObserver | null>(null)
+  const dockRef = useCallback((el: HTMLDivElement | null) => {
+    dockObserverRef.current?.disconnect()
+    dockObserverRef.current = null
+    if (!el) { setDockH(0); setDockGutter(0); return }
+    const measure = () => {
+      setDockH(el.offsetHeight)
+      const sc = scrollerRef.current
+      setDockGutter(sc ? Math.max(0, sc.offsetWidth - sc.clientWidth) : 0)
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    // The gutter is the scroller's own reserved column, so watch the scroller
+    // too: an engine with overlay scrollbars changes that width without the
+    // dock resizing.
+    if (scrollerRef.current) ro.observe(scrollerRef.current)
+    dockObserverRef.current = ro
+  }, [scrollerRef])
 
   // Quote / Ask on selected assistant text — the shared chat-core seam
   // (chat-core/composer/selectionActions): Quote lands in this composer with
@@ -7633,6 +7652,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 key="welcome-hero"
                 layout
                 className="flex-1 flex flex-col items-center justify-center gap-6 px-8 min-h-0 overflow-y-auto"
+                // The dock floats over this box too, so the padding keeps the
+                // hero centred in the visible strip rather than behind the glass.
+                style={{ paddingBottom: dockH }}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -7666,16 +7688,17 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               virt={virt}
               loadingOlder={loadingOlder}
               spinnerNearTop={spinnerNearTop}
-              // Second half of the fade-band clearance, alongside
-              // TRANSCRIPT_TAIL_SPACER_PX. Unlike the tail spacer this one also
-              // applies to a transcript short enough not to scroll, so both are
-              // needed for the last line to clear the band in every state.
+              // The strip of the scroller the floating dock covers, plus
+              // DOCK_CLEARANCE_PX, alongside TRANSCRIPT_TAIL_SPACER_PX. Unlike
+              // the tail spacer this one also applies to a transcript short
+              // enough not to scroll, so both are needed for the last line to
+              // clear the dock in every state.
               // `visibility` is not one of the properties the shell claims, so
               // adding it here is inside its documented contract. Hiding rather
               // than unmounting keeps the scroller's geometry and the height
               // cache intact -- the restore needs to WRITE scrollTop while this
               // is up, which a display:none element cannot do.
-              scrollerStyle={{ paddingBottom: 16, ...(virt.restoreGate ? { visibility: 'hidden' as const } : null) }}
+              scrollerStyle={{ paddingBottom: dockH + DOCK_CLEARANCE_PX, ...(virt.restoreGate ? { visibility: 'hidden' as const } : null) }}
               aboveRows={<>
               {/* Mid-switch `slotHasMore` still describes the outgoing chat, so the cursor
                   key gates the bar to match the paging thunk's own precondition. */}
@@ -7740,9 +7763,9 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               )}
               {/* Tail spacer, in px rather than vh. It plus the scroller's own
                   bottom padding is the clearance between the last line of the
-                  transcript and the FIXED-height fade band below, so expressing it
-                  in `vh` made that clearance viewport-dependent: at 2vh + 8px it
-                  cleared a 24px band by 1px at 844px tall and cut INTO the last
+                  transcript and the top of the floating composer dock, so
+                  expressing it in `vh` made that clearance viewport-dependent: at
+                  2vh + 8px it cleared by 1px at 844px tall and cut INTO the last
                   line on anything shorter (−1px at 740, −2px at 700, −5px at 560),
                   which is the sliced-glyph hairline reported from a phone and the
                   reason it looked mobile-only. */}
@@ -7846,50 +7869,31 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 ready -- looked like different events. A spinner also says only
                 "wait", where a skeleton previews the shape that is coming. */}
             {(slotLoading || virt.restoreGate) && <ChatTranscriptSkeleton />}
-            {/* Transcript bottom mask. Its box deliberately does NOT stop at the
-                scrollport's bottom edge — it reaches DOWN to the composer box, and
-                that overshoot is the point.
-
-                The band used to end exactly on that boundary, which left the
-                COMPOSER_MASK_OVERSHOOT_PX strip between it and the input box
-                unmasked and a hairline showed through there. So the box now spans
-                `above` px over the boundary — feathering the hard clip, since the
-                transcript is cut at the scrollport edge whenever the user is
-                scrolled up — PLUS that strip below it, kept opaque so the mask is
-                flush against the input box with nothing between them.
-
-                The three numbers are one arithmetic unit and must move together:
-                height = above + overshoot, and the two negative margins cancel the
-                whole box, so it paints over both regions while consuming ZERO
-                layout. A positive residual would push the composer down instead.
-
-                The solid stop runs from the bottom up through a few px ABOVE the
-                boundary on purpose: a ramp that reaches full opacity only AT the
-                clip edge leaves its topmost rows just shy of opaque, and the clipped
-                glyphs bleed through (measured over a blank control at 390px:
-                +7.6 / +5.2 / +1.9 mean channel at 3 / 2 / 1px above the edge, 0.00
-                once the bottom is solid). TRANSCRIPT_TAIL_SPACER_PX plus the
-                scroller's padding must stay >= `above`, the part that reaches up
-                into readable content. ChatPage.fadeClearance.test.tsx pins all of
-                it, including that the overshoot never covers the box's own top
-                border. */}
-            <div
-              aria-hidden
-              className="bg-gradient-to-t from-bg from-[62%] to-transparent pointer-events-none relative z-[1]"
-              style={{
-                height: TRANSCRIPT_MASK_ABOVE_PX + COMPOSER_MASK_OVERSHOOT_PX,
-                marginTop: -TRANSCRIPT_MASK_ABOVE_PX,
-                marginBottom: -COMPOSER_MASK_OVERSHOOT_PX,
-              }}
-            />
-            <div className="relative">
+            {/* Composer dock. Floats over the bottom of the transcript scroller
+                instead of sitting under it in the flex column, so the scroller
+                runs the full height of the pane and the conversation scrolls
+                UNDER the glass (iOS toolbar layout). The scroller pays for the
+                covered strip with `paddingBottom: dockH + DOCK_CLEARANCE_PX`,
+                measured from this box by `dockRef`. No z-index here on purpose:
+                a positioned box with `z-index: auto` forms no stacking context,
+                so SubagentProgressBar's wave chip keeps its `z-[46]` against
+                the theme-experience overlays it was lifted to clear, and the
+                dock still paints over the scroller because it follows it in
+                DOM order. `pointer-events-none` on the root, restored on the
+                CHILDREN of the two wrapper boxes (`dock-inert`, index.css) —
+                each child is its own 900px column, so the two wrappers, which
+                span the pane, never catch a wheel of their own — then the empty
+                width either side of the column lets wheel and touch reach the
+                transcript underneath, as the strip beside an iOS toolbar does.
+                `right: dockGutter` keeps the scrollbar column clear (above). */}
+            <div ref={dockRef} className="absolute left-0 bottom-0 pointer-events-none" style={{ right: dockGutter }} data-testid="composer-dock-root">
               <JumpToBottomButton visible={!isAtBottom && messages.length > 0} onClick={() => scrollBottom(true)} />
-              {/* Status chrome never claims more than half the pane. These bars
-                  are flex-flow siblings of the transcript scroller, which has an
-                  automatic minimum size of 0 and collapses under pressure — an
-                  opening keyboard shrinks the layout viewport, so an uncapped
-                  stack rises into the title band at the top of the pane and
-                  covers the rename editor. Capping makes the stack yield first.
+              {/* Status chrome never claims more than half the pane. The dock
+                  is anchored to the pane's bottom edge and grows upward, so an
+                  opening keyboard — which shrinks the layout viewport — would
+                  let an uncapped stack rise into the title band at the top of
+                  the pane and cover the rename editor. Capping makes the stack
+                  yield first.
                   `svh` not `%` (a percentage resolves against this wrapper's own
                   content-derived height, so it computes to none) and not `vh`
                   (which over-measures a phone showing its URL bar). Scoped to
@@ -7909,7 +7913,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                   `overflow-y-auto overscroll-contain`): it replaces the global
                   always-visible `var(--border)` thumb with a hover-revealed
                   overlay one, so the capped box does not carry a permanent bar. */}
-              <div ref={composerBandRef} className="max-h-[50svh] overflow-y-auto overscroll-contain scrollbar-overlay pb-[11px] mb-[-11px]" data-testid="composer-status-stack">
+              <div ref={composerBandRef} className="max-h-[50svh] overflow-y-auto overscroll-contain scrollbar-overlay pb-[11px] mb-[-11px] dock-inert" data-testid="composer-status-stack">
               {/* Not gated on activityOpen (unlike the two bars below): the
                   activity sidebar has no TODO view, so hiding it there would
                   lose the information rather than de-duplicate it. */}
@@ -7930,7 +7934,7 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
               <QueueStack messages={queuedMessages} onCancel={handleCancelQueued} onInterrupt={handleInterruptQueued} onEdit={handleEditQueued} onReorder={handleReorderQueued} pendingIds={queuePendingIds} fuseBelow={followUpOptions.length === 0 && !knowledgeFetch.pendingKnowledge} />
               </div>
               {flyingQuote && <FlyingQuote text={flyingQuote.text} from={flyingQuote.from} targetRef={inputAreaRef} onComplete={endQuoteFlight} />}
-              <div ref={inputAreaRef} className="relative z-10">
+              <div ref={inputAreaRef} className="relative z-10 dock-inert">
               {/* The refused-press answer sits directly above the composer,
                   adjacent to the message-footer controls that raised it, so the
                   press cannot fail silently. Shares the chat column's own
@@ -8078,8 +8082,10 @@ export default function ChatPage({ mode, embedded, embedMode, popout, noUrlSync 
                 </div>
               )}
               {showComposerMemoryChip && (
-                // Opaque backdrop: at phone widths the welcome cards scroll under this row.
-                <div className="relative z-10 flex justify-center px-4 pt-2 pb-2 bg-bg" data-testid="composer-memory-chip">
+                // No backdrop: the chip is glass and whatever scrolls under it is meant to show.
+                // `w-fit`, not a full-width flex row: the box is a `dock-inert` child, so
+                // it catches input, and it should be no wider than the chip it holds.
+                <div className="relative z-10 mx-auto w-fit px-4 pt-2 pb-2" data-testid="composer-memory-chip">
                   <MemoryModeChip memoryMode={currentSlot?.memory_mode ?? 'persistent'} onSwitchMode={switchMemoryMode} />
                 </div>
               )}
