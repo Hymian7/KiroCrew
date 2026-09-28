@@ -101,7 +101,7 @@ def _pin_ssh_accept_new(monkeypatch: pytest.MonkeyPatch) -> None:
 def _resolved_identity(target: object) -> tuple[int, int] | None:
     """``(st_dev, st_ino)`` of the object *target* names, or ``None``.
 
-    A pinned target is a ``/proc/self/fd/<n>`` bytes path (PR #13715); its fd is
+    A pinned target is a ``/proc/self/fd/<n>`` bytes path; its fd is
     still open when the launcher calls ``mount``, so it is ``fstat``-ed here at
     that moment rather than by re-resolving the spelling later. A plain path is
     ``lstat``-ed. ``None`` for anything that cannot be resolved (e.g. ``None`` for
@@ -146,7 +146,7 @@ class _FakeLibc:
         #: Per-call ``(st_dev, st_ino)`` of the object each target RESOLVED to at
         #: mount time, or ``None`` when it could not be resolved. Captured here
         #: because the launcher pins its seal/hide targets as ``/proc/self/fd/<n>``
-        #: descriptor paths (PR #13715), whose fd is open only during the region's
+        #: descriptor paths, whose fd is open only during the region's
         #: run -- a caller comparing after the region has no fd left to fstat.
         self.resolved: list[tuple[int, int] | None] = []
 
@@ -423,9 +423,9 @@ def _seal_and_hide_positions(libc: _FakeLibc, parent: str, leaf: str) -> tuple[i
     """Call indexes of the parent's self-bind, its sealing remount, and the
     leaf's hide, in the order the region issued them.
 
-    The launcher pins its targets as ``/proc/self/fd/<n>`` descriptor paths
-    (PR #13715), so a target is matched by the OBJECT it resolved to at mount
-    time (``libc.resolved``) rather than by the spelling, which no longer equals
+    The launcher pins its targets as ``/proc/self/fd/<n>`` descriptor paths,
+    so a target is matched by the OBJECT it resolved to at mount
+    time (``libc.resolved``) rather than by the spelling, which need not equal
     the configured path. The self-bind's SOURCE is still the raw parent path.
     """
     calls = libc.calls
@@ -446,7 +446,8 @@ def _seal_and_hide_positions(libc: _FakeLibc, parent: str, leaf: str) -> tuple[i
         if resolved[i] == parent_key and flags == _MS_BIND
     )
     remount = next(
-        i for i, (_src, _tgt, flags) in enumerate(calls)
+        i
+        for i, (_src, _tgt, flags) in enumerate(calls)
         if resolved[i] == parent_key and flags & _MS_REMOUNT
     )
     hide = next(
