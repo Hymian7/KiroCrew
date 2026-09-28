@@ -4,8 +4,9 @@ The only backend that needs BOTH faces:
 
 * **Wire** — MCP servers arrive as the ``mcpServers`` parameter of
   ``session/new`` / ``session/load``. The adapter reads no agent file, so that
-  array is the session's entire MCP surface: empty means the harness works and
-  every Crew tool is absent, with no error.
+  array is the only channel Crew has onto the session's MCP surface (the harness
+  mounts its own user- and project-scope ``mcpServers`` and plugins beside it):
+  empty means the harness works and every Crew tool is absent, with no error.
 * **File** — ``<work_dir>/.claude/settings.local.json``, which the adapter loads
   itself, carries the model allowlist, the resolved model, the permission mode
   and the deny rules derived from ``disabledTools``.
@@ -52,8 +53,8 @@ class ClaudeCodeMirror(AgentConfigMirror):
                 "acp.session_mcp.session_mcp_servers, with the shared gateway's "
                 "pooled broker stubs placed HERE beside the translation so one "
                 "withhold rule covers both halves of the array -- codex parity. "
-                "The adapter reads no agent file, so this array is the session's "
-                "whole MCP surface. Delivered ONLY when Crew authored "
+                "The adapter reads no agent file, so this array is the only channel "
+                "Crew has onto the session's MCP surface. Delivered ONLY when Crew authored "
                 "settings.local.json: that file is this backend's permission "
                 "surface, and a tool Crew cannot gate must not be handed to the "
                 "session at all -- stubs included, since a stub is the same "

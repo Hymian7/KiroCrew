@@ -304,16 +304,31 @@ bucket keeps describing, made visible instead of re-diagnosed. Satisfaction is p
 backend, by membership in `ACP_BACKENDS_SPEC_SERVERS_OFF_WIRE`: kiro-cli reads the
 spec itself via `--agent` and KAS receives it as a projected agent definition in
 `_meta`, so their refs resolve against the spec's own `mcpServers`, while a harness
-that mounts exactly the array it is sent is satisfied only by that array (a broker
-stub counts on either, since it arrives under the name it wraps). It never alters
+that Crew reaches only through the array it is sent is satisfied, as far as Crew
+can see, only by that array (a broker stub counts on either, since it arrives under
+the name it wraps). What the line CLAIMS about an unresolved ref is the same on
+every backend, and it is only what the wire proves: its leading clause says the ref
+names no server in Crew's projection for the session, and its verdict is that Crew's
+projection delivers none of those servers, and the harness may mount a same-named
+server from its own configuration, so a listed ref may still be served and the line
+cannot tell which. "Absent" would be the strong claim, and no backend's array is
+provably the session's whole MCP surface — Claude Code mounts its own user- and
+project-scope `mcpServers` and plugins beside the array, codex-acp merges the array
+on top of `~/.codex/config.toml`, and kiro-cli loads the global
+`~/.kiro/settings/mcp.json` into every agent by default (a spec may opt out of the
+global file with `includeMcpJson: false`). Crew reads
+no harness configuration to subtract those servers: the list stays what the wire
+proves, and only the verdict stops short of what the wire cannot prove. It never alters
 the array and never fails the session, and it adds
 no `await` to any construction path — the snapshot rides in the `mkdir` hop
 `_spawn` already had (H13). `kirocrew doctor` runs the same resolver per selectable
 backend through `agent_sdk.drivers.acp.agent_spec_mcp_refs`, which reads the mirror
 seam — so a backend projecting outside `providers/mirrors/` (KAS) reads as
-unprojected there. KAS is also the one backend the RUNTIME detector does not reach:
-it composes its array on `AcpRuntime`, not at `AcpClient`'s call sites, so its refs
-are checked statically only.
+unprojected there — and its no-mirror row carries the same hedged verdict. KAS is
+checked at runtime as well as statically: it composes its array on `AcpRuntime`,
+not at `AcpClient`'s call sites, and `AcpRuntime._guard_unresolved_mcp_refs`, the
+runtime-path twin of `AcpClient`'s, runs the same guard from
+`_finish_create_session` and `load_session`.
 
 **A provider must declare:** its injection channel and precedence rule, its
 server shape, its env-expansion semantics, its loader strictness, which field (if

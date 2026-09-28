@@ -42,6 +42,7 @@ from kiro_crew.acp.types import (
     ACP_BACKEND_CODEX,
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
+    ACP_BACKENDS_KNOWN,
     ACP_BACKENDS_SPEC_SERVERS_OFF_WIRE,
 )
 from kiro_crew.agent_sdk import mcp_refs as mcp_refs_mod
@@ -355,6 +356,44 @@ class TestTheWarning:
                 spec, [], backend=ACP_BACKEND_CODEX, agent="a", gateway_enabled=True
             )
         assert "mcp_gateway=on" in caplog.records[-1].getMessage()
+
+    @pytest.mark.parametrize("backend", sorted(ACP_BACKENDS_KNOWN), ids=lambda b: b or "kiro")
+    def test_the_verdict_claims_only_what_the_wire_proves_on_every_backend(self, backend, caplog):
+        """No backend's array is provably the session's whole MCP surface.
+
+        Claude Code loads its own user- and project-scope ``mcpServers`` and its
+        plugins beside the array Crew sends; codex-acp merges Crew's array on top of
+        what its own ``config.toml`` declares; kiro-cli loads the global
+        ``settings/mcp.json`` into every agent whatever the spec says. On any of
+        them a ref nothing of Crew's satisfies can still be served by a same-named
+        server the harness mounted itself -- and the detector, which reads the wire
+        (or the spec) alone by design, cannot tell the two apart. So the line says
+        the harness may mount such a server and never asserts the tools absent.
+        Pinned as the full line, on every known backend, so a backend-shaped branch
+        cannot creep back in -- and the leading clause claims only Crew's
+        projection, not what the session receives, which is the very thing the
+        verdict says the line cannot know.
+        """
+        spec = {"tools": ["@glean", "@kirocrew-core"], "mcpServers": {"other": _CORE}}
+        with caplog.at_level(logging.WARNING, logger=mcp_ref_guard.__name__):
+            found = warn_unresolved_server_refs(
+                spec, [], backend=backend, agent="kirocrew", gateway_enabled=False
+            )
+        assert found == ["@glean", "@kirocrew-core"]
+        text = caplog.records[-1].getMessage()
+        assert text == (
+            "agent-spec tool refs name no MCP server in Crew's projection for this "
+            f"session: backend={backend!r} agent='kirocrew' unresolved=@glean, "
+            "@kirocrew-core mcp_gateway=off. Crew's projection delivers none of those "
+            "servers; the harness may mount a same-named server from its own "
+            "configuration, so a listed ref may still be served and this line cannot "
+            "tell which. The harness still works. A backend that reads no agent file "
+            "needs a mirror (src/kiro_crew/providers/mirrors/) to project the spec "
+            "onto its session/new mcpServers array."
+        )
+        assert "absent from the session" not in text
+        assert "nothing else to say so" not in text
+        assert "this session receives" not in text
 
     def test_a_healthy_spec_logs_nothing(self, caplog):
         spec = {"tools": ["@srv"], "mcpServers": {"srv": {"command": "/bin/srv"}}}
@@ -700,10 +739,11 @@ class TestTheCompositionPath:
         The refs the mirror projects resolve, so the guard is silent about them.
         What it still reports is what the mirror deliberately WITHHOLDS: an
         identity-bound Crew server reaches codex from the spec unreplaced and would
-        answer ``not_bound`` to every call, so it is not mounted -- and this guard's
-        own sentence is then exactly right, the tools are absent from the session.
-        Two lines, two jobs: the mirror logs WHY it withheld, and this one records
-        that the spec asked for it.
+        answer ``not_bound`` to every call, so it is not mounted. Two lines, two
+        jobs: the mirror logs WHY it withheld, and this one records that the spec
+        asked for it -- with the hedged verdict every backend gets, since a same-named
+        server from the operator's own ``config.toml`` is the one thing the wire
+        cannot rule out.
 
         Driven through the runtime-path composition (:meth:`_codex_wire`), because
         that is where a codex array is built. The claim under test is unchanged by

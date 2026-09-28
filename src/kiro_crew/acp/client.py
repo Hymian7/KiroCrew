@@ -10371,9 +10371,9 @@ class AcpClient:
             "cwd": await self._session_work_dir(),
             # kiro-cli loads servers from --agent; a harness in
             # ACP_BACKENDS_SESSION_MCP_ARRAY must be told here -- it reads no
-            # agent spec of its own, so this array is the whole MCP surface of
-            # the session (translated from that same spec, see
-            # acp/session_mcp.py). Empty on the kiro-cli path.
+            # agent spec of its own, so this array is the only channel Crew has
+            # onto the session's MCP surface (translated from that same spec,
+            # see acp/session_mcp.py). Empty on the kiro-cli path.
             # Pooled broker stubs are appended for kiro-cli: a session-injected
             # server outranks the same-named entry in the agent spec, which is
             # how pooling takes effect without writing a spec anywhere.
@@ -10575,8 +10575,8 @@ class AcpClient:
                         "cwd": await self._session_work_dir(),
                         # kiro-cli gets its servers via --agent; a session-array
                         # backend must receive them here as well -- a resumed
-                        # session re-declares its whole MCP surface or comes back
-                        # with no tools (see session/new above). Pooled stubs are
+                        # session re-declares everything Crew mounts on it or comes
+                        # back with no tools (see session/new above). Pooled stubs are
                         # re-declared so a resumed session keeps talking to the
                         # broker. Gated per backend, and in-memory here vs
                         # off-loop there, for the same reasons as session/new.
@@ -10596,8 +10596,8 @@ class AcpClient:
                         # it would not know what to do with.
                         load_params["_meta"] = {"_kiro.dev/session_file": session_file}
                     self._begin_session_report(load_params.get("mcpServers"))
-                    # A resumed session re-declares its whole MCP surface, so it can
-                    # be short of a referenced server exactly as a fresh one can.
+                    # A resumed session re-declares everything Crew mounts on it, so it
+                    # can be short of a referenced server exactly as a fresh one can.
                     self._guard_unresolved_mcp_refs(load_params.get("mcpServers"))
                     load_id = await self._send_request(restore_method, load_params)
                     load_resp = await self._wait_for_response(

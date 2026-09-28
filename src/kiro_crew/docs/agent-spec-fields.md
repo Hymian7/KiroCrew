@@ -157,8 +157,9 @@ underneath.
 1. Delivered ONLY when Crew authored `<work_dir>/.claude/settings.local.json`.
    That file is this session's permission surface, and a tool Crew cannot gate is
    not handed to the session at all — so a project carrying its own copy gets no
-   Crew MCP tools rather than ungoverned ones. The array is otherwise this
-   session's entire MCP surface, because the adapter reads no agent file.
+   Crew MCP tools rather than ungoverned ones. The array is otherwise the only
+   channel Crew has onto this session's MCP surface, because the adapter reads no
+   agent file; what the harness mounts from its own configuration sits beside it.
 2. Written from the SESSION and from Crew's model registry, not copied out of the
    spec. Which is why no mirrored harness honours a spec-REQUESTED permission
    mode: `claude` is delivering the mode the session asked for, not the one the

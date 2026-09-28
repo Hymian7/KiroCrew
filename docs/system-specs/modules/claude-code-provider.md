@@ -139,8 +139,9 @@ ACP is not answered in this repository, and is the prerequisite for Crew gating
 ### MCP tools on a Claude session
 
 The `claude-agent-acp` adapter reads **no** agent file: the `mcpServers` array on
-`session/new` / `session/load` is the entire MCP surface a Claude session has, and
-an empty one means zero Crew tools — `kirocrew-core`, cron and every
+`session/new` / `session/load` is the only channel Crew has onto a Claude session's
+MCP surface (the harness mounts its own user- and project-scope `mcpServers` and
+plugins beside it), and an empty one means zero Crew tools — `kirocrew-core`, cron and every
 user-configured server absent, while the harness itself (prompts, streaming, model
 and effort selection, the full `session/request_permission` flow) works. So
 `_session_mcp_servers()` fills it, from `acp/session_mcp.py`:
@@ -302,7 +303,8 @@ applies, never a widening of what the session can do:
   unless that file pre-approves it — the same boundary the inherited-`~/.claude`
   gap below already documents, arriving through the project file instead.
 - **That session also gets no `mcpServers` array at all**, and this is what keeps
-  the sentence above true. The array is the session's whole MCP surface, so
+  the sentence above true. The array is the only channel Crew has onto the
+  session's MCP surface, so
   delivering it here would hand `spawn_run`, `cron_add`, `send_message` and every
   configured server into a permission surface Crew does not control — a
   `permissions.allow` entry in the project's own file pre-approves the tool, no

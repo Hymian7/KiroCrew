@@ -34,9 +34,12 @@ kiro-cli is handed ``--agent`` and reads the spec itself; KAS receives the spec'
 servers as a projected agent definition in ``_meta`` -- so for it a ref is
 satisfied by the spec's OWN definition, and the array it gets carries broker
 stubs at most. Reading a member's refs against the wire would report every single
-one as unresolved on the healthiest install there is. Every other harness mounts
-exactly the array it is sent, so the wire array is the whole MCP surface of the
-session and the only thing that can satisfy a ref. A session-injected broker stub
+one as unresolved on the healthiest install there is. Every other harness is
+reached only through the array it is sent, so the wire array is the only channel
+Crew has onto the session and the only thing that can satisfy a ref -- what the
+harness mounts from a configuration of its own beside it is not Crew's to see,
+which is why the log line's verdict is a separate question
+(:mod:`kiro_crew.acp.mcp_ref_guard`). A session-injected broker stub
 satisfies a ref on either kind, because it arrives on the wire under the same
 name as the entry it wraps.
 

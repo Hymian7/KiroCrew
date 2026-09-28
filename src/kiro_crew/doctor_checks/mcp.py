@@ -78,16 +78,22 @@ def _doctor_unresolved_mcp_refs() -> None:
         refs = ", ".join(render._safe_display(ref) for ref in unresolved)
         if not has_mirror:
             print(f"  mcp tool refs: \u23f9 {label} has no mirror; unprojected: {refs}")
+            # The verdict is the runtime line's (acp/mcp_ref_guard.py), and it is
+            # the same on every backend: "absent" is the strong claim, and no
+            # backend's array is provably the session's whole MCP surface -- the
+            # harness may serve a listed ref from a configuration of its own, which
+            # neither this row nor the runtime line reads.
             render._print_wrapped(
-                "Those refs name no server this backend would be handed, so the "
-                "tools behind them are absent from its sessions with nothing to "
-                "say so. The shared MCP gateway can still deliver a server it "
-                "wrapped as a broker stub, which this row does not model. "
-                "Which of those it is -- a decided no-channel harness or a "
-                "projection that lives outside providers/mirrors/ -- is the KIND "
-                "on that backend's entry in providers/mirrors/registry.py "
-                "(PROJECTIONS); a backend that projects elsewhere reads as "
-                "unprojected here."
+                "Those refs name no server this backend would be handed. Crew's "
+                "projection delivers none of them; the harness may mount a "
+                "same-named server from its own configuration, so a listed ref may "
+                "still be served and this row cannot tell which. The shared MCP "
+                "gateway can still deliver a server it wrapped as a broker stub, "
+                "which this row does not model. Which of those it is -- a decided "
+                "no-channel harness or a projection that lives outside "
+                "providers/mirrors/ -- is the KIND on that backend's entry in "
+                "providers/mirrors/registry.py (PROJECTIONS); a backend that "
+                "projects elsewhere reads as unprojected here."
             )
             continue
         print(f"  mcp tool refs: \u26a0 {label} projects a spec that still misses: {refs}")

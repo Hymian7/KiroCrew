@@ -239,8 +239,8 @@ class CodexHarness(MembershipHarness):
 
         codex-acp takes no argv of its own: any invocation enters stdio-server mode
         and blocks on stdin. So there is no ``--agent`` (the adapter reads no
-        ``~/.kiro/agents/<name>.json``; the session's whole MCP surface arrives in
-        the ``session/new`` array instead) and no ``--model`` (the model is chosen
+        ``~/.kiro/agents/<name>.json``; everything Crew mounts on the session
+        arrives in the ``session/new`` array instead) and no ``--model`` (the model is chosen
         per session over ``session/set_config_option``, so pinning one at process
         start would apply it to every session on this process).
 

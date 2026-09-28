@@ -453,6 +453,31 @@ class TestUnresolvedMcpRefs:
         assert "codex has no mirror" in out
         assert "@kirocrew-core" in out
 
+    def test_the_no_mirror_verdict_claims_only_what_the_wire_proves(self, monkeypatch, capsys):
+        """The static half hedges exactly as the runtime line does, on every backend.
+
+        The row is the same detector before a session exists, so it may not assert
+        what the runtime line stopped asserting: the harness may mount a same-named
+        server from its own configuration, which neither half reads, so the row
+        says a listed ref may still be served and never that the tools are absent.
+        One sentence, no backend condition; the broker-stub caveat and the registry
+        pointer stay. Called at the row's own home in ``doctor_checks.mcp`` (the
+        ``cli_doctor`` name is the facade's re-export of the same function).
+        """
+        from kiro_crew.doctor_checks import mcp as doctor_mcp
+
+        for backend in ("goose", ""):
+            self._arrange(monkeypatch, [(backend, ["@ghost"], False)])
+            doctor_mcp._doctor_unresolved_mcp_refs()
+            # ``_print_wrapped`` folds the paragraph, so compare on collapsed whitespace.
+            out = " ".join(capsys.readouterr().out.split())
+            assert "may mount a same-named server from its own configuration" in out
+            assert "this row cannot tell which" in out
+            assert "absent from its sessions" not in out
+            assert "nothing to say so" not in out
+            assert "broker stub, which this row does not model" in out
+            assert "providers/mirrors/registry.py" in out
+
     def test_a_healthy_projection_prints_a_clean_row(self, monkeypatch, capsys):
         self._arrange(monkeypatch, [("claude", [], True)])
         cli_doctor._doctor_unresolved_mcp_refs()
