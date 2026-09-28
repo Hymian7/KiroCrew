@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
+import hmac
 import inspect
 import json
 import os
@@ -611,8 +613,9 @@ log.flush()
         with patch.object(Path, "mkdir", uncreatable_trust):
             log = SecurityEventLog(base_dir=tmp_path, sync=True)
             assert log._hmac_key_file == legacy, "precondition: fallback not taken"
-            assert log._chain_lock_target() == (legacy, False), (
-                "the fallback must lock the existing legacy key and never create it"
+            assert log._chain_lock_target() == (legacy, False, None), (
+                "the fallback must lock the existing legacy key, never create it, "
+                "and carry no directory pin (its parent is the operator's log dir)"
             )
             log.log(_make_event(event_id="legacy-lock-crit"), critical=True)
             log.log(_make_event(event_id="legacy-lock-soft"))
@@ -2327,7 +2330,7 @@ class TestHmacKeyTrustDirMigration:
         assert any("replaced by the legacy" in r.message for r in caplog.records)
 
     def test_short_legacy_file_does_not_destroy_a_usable_migrated_key(
-        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+        self, tmp_path: Path
     ) -> None:
         """A 0-byte legacy file must not replace the key that signed the chain.
 
@@ -2337,6 +2340,10 @@ class TestHmacKeyTrustDirMigration:
         the real key. Promoting that file destroys the only copy of the signing
         key, and the minimum-length check then fails init on every later boot, so
         the loss is unrecoverable rather than merely wrong.
+
+        Refusing is what makes that unrecoverable outcome impossible: BOTH files
+        survive byte-for-byte, so the operator's recovery (remove the stub) is
+        always available, and the chain still verifies afterwards.
         """
         log1 = SecurityEventLog(base_dir=tmp_path, sync=True)
         log1.log_tool_invocation(session_key="s1", tool_name="t1", tool_kind="tool", outcome="ok")
@@ -2346,21 +2353,165 @@ class TestHmacKeyTrustDirMigration:
         (tmp_path / "sel_hmac.key").write_bytes(b"")
         self._reset()
 
-        with caplog.at_level("WARNING", logger="kiro_crew.sel"):
-            log2 = SecurityEventLog(base_dir=tmp_path, sync=True)
+        with pytest.raises(RuntimeError, match="too short to be a key"):
+            SecurityEventLog(base_dir=tmp_path, sync=True)
 
         assert (
             tmp_path / "trust" / "sel_hmac.key"
         ).read_bytes() == real_key, "the 0-byte legacy file was promoted over the real key"
-        assert log2._hmac_key == real_key
-        total, valid = log2.verify_integrity()
-        assert (total, valid) == (1, 1), "the pre-existing chain no longer verifies"
-        assert any("too short to be a key" in r.message for r in caplog.records)
+        assert (tmp_path / "sel_hmac.key").read_bytes() == b"", "the legacy stub was rewritten"
 
-        # The next boot still initializes, because the key was never lost.
+        # The operator's recovery: remove the stub the old writer left behind.
+        (tmp_path / "sel_hmac.key").unlink()
         self._reset()
         log3 = SecurityEventLog(base_dir=tmp_path, sync=True)
         assert log3._hmac_key == real_key
+        assert log3.verify_integrity() == (1, 1), "the pre-existing chain no longer verifies"
+
+    def test_planted_destination_key_is_not_adopted_over_a_short_legacy_key(
+        self, tmp_path: Path
+    ) -> None:
+        """Length is not trust: a destination key of the right size is refused.
+
+        The pairing is producible by the audited agent itself -- ``trust`` and
+        ``sel_hmac.key`` are both sandbox read-write leaves -- so truncating the
+        legacy key below the minimum and planting a long-enough destination is an
+        ordinary capability, not an extreme combination. Adopting the destination
+        on its size alone would sign every later SEL and session-identity MAC
+        with bytes the attacker chose, with no recovery path.
+        """
+        log1 = SecurityEventLog(base_dir=tmp_path, sync=True)
+        log1.log_tool_invocation(session_key="s1", tool_name="t1", tool_kind="tool", outcome="ok")
+        real_key = log1._hmac_key
+        self._reset()
+
+        # What the agent can do: truncate the legacy anchor, plant a key it knows.
+        (tmp_path / "sel_hmac.key").write_bytes(b"short")
+        planted = b"p" * 64
+        assert planted != real_key
+        (tmp_path / "trust" / "sel_hmac.key").write_bytes(planted)
+
+        with pytest.raises(RuntimeError, match="refusing to adopt"):
+            SecurityEventLog(base_dir=tmp_path, sync=True)
+
+    def test_a_forged_audit_row_cannot_authenticate_a_planted_key(self, tmp_path: Path) -> None:
+        """The refusal must not be resolvable by evidence the agent can write.
+
+        Every file that could vouch for the destination key -- the key itself,
+        the legacy key, ``security_events.jsonl`` and ``security_events.d`` -- is
+        a sandbox read-WRITE leaf for the audited agent, so a check against any
+        of them authenticates the attacker's own evidence. This is the shape that
+        makes the audit log the worst possible anchor: the planted key signs a
+        row the agent appended, so a log-anchored proof gate would ADOPT it.
+        """
+        log1 = SecurityEventLog(base_dir=tmp_path, sync=True)
+        log1.log_tool_invocation(session_key="s1", tool_name="t1", tool_kind="tool", outcome="ok")
+        self._reset()
+
+        planted = b"p" * 64
+        (tmp_path / "sel_hmac.key").write_bytes(b"short")
+        (tmp_path / "trust" / "sel_hmac.key").write_bytes(planted)
+
+        # A row whose entry_hash IS an HMAC under the planted key, appended as the
+        # newest record -- exactly what a log-anchored gate would accept as proof.
+        forged = {"event_id": "forged", "timestamp": "2026-01-01T00:00:00Z"}
+        payload = json.dumps(forged, sort_keys=True).encode()
+        forged["entry_hash"] = hmac.new(planted, payload, hashlib.sha256).hexdigest()
+        with (tmp_path / "security_events.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(forged) + "\n")
+
+        with pytest.raises(RuntimeError, match="refusing to adopt"):
+            SecurityEventLog(base_dir=tmp_path, sync=True)
+        assert (
+            tmp_path / "trust" / "sel_hmac.key"
+        ).read_bytes() == planted, "precondition: the planted key was left in place, not consumed"
+
+    def test_short_legacy_key_with_an_empty_log_fails_closed(self, tmp_path: Path) -> None:
+        """The refusal does not depend on there being history to weigh.
+
+        A fresh directory holding only the ambiguous pair is refused for the same
+        single reason as one with a full chain, so no branch of this decision can
+        be unlocked by controlling how much the log contains.
+        """
+        (tmp_path / "sel_hmac.key").write_bytes(b"")
+        (tmp_path / "trust").mkdir()
+        (tmp_path / "trust" / "sel_hmac.key").write_bytes(b"p" * 64)
+
+        with pytest.raises(RuntimeError, match="refusing to adopt"):
+            SecurityEventLog(base_dir=tmp_path, sync=True)
+
+    @pytest.mark.skipif(
+        not sel_mod._PIN_BY_FD_SUPPORTED, reason="platform has no directory descriptors"
+    )
+    def test_chain_lock_sidecar_is_opened_inside_the_pinned_directory(
+        self, tmp_path: Path
+    ) -> None:
+        """A ``trust`` replaced after the screen must not move the sidecar.
+
+        The by-name screen and the sidecar's open are separate syscalls, and
+        ``trust`` is a read-write leaf for the audited agent, so it can swap the
+        directory in that window: both writers' screens then pass while their
+        opens land in different directories, and two flocks on two inodes is the
+        forked chain the lock exists to prevent. With the open resolved relative
+        to the pinned descriptor, the swap cannot redirect it -- the sidecar
+        appears under the inode that was screened, not under the new name.
+        """
+        log = SecurityEventLog(base_dir=tmp_path, sync=True)
+        trust = tmp_path / "trust"
+        pinned_identity = (trust.stat().st_dev, trust.stat().st_ino)
+        (trust / sel_mod._SEL_LOCK_FILE).unlink(missing_ok=True)
+
+        real_open = os.open
+        swapped: list[Path] = []
+
+        def swapping_open(path, flags, *args, **kwargs):
+            # Fire once, at the sidecar's own dir-relative open: the pin is
+            # already taken, so this is exactly the window the finding named.
+            if kwargs.get("dir_fd") is not None and path == sel_mod._SEL_LOCK_FILE and not swapped:
+                moved = tmp_path / "trust-pinned"
+                trust.rename(moved)
+                decoy = tmp_path / "trust"
+                decoy.mkdir()
+                swapped.append(moved)
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch.object(os, "open", swapping_open):
+            with log._chain_lock():
+                pass
+
+        assert swapped, "the swap never fired; the sidecar was not opened dir-relative"
+        moved = swapped[0]
+        assert (moved.stat().st_dev, moved.stat().st_ino) == pinned_identity
+        assert (
+            moved / sel_mod._SEL_LOCK_FILE
+        ).exists(), "the sidecar did not land in the pinned directory"
+        assert not (
+            tmp_path / "trust" / sel_mod._SEL_LOCK_FILE
+        ).exists(), "the swapped-in decoy captured the sidecar"
+
+    @pytest.mark.skipif(
+        not sel_mod._PIN_BY_FD_SUPPORTED, reason="platform has no directory descriptors"
+    )
+    def test_lock_dir_pin_refuses_a_directory_swapped_under_its_name(
+        self, tmp_path: Path
+    ) -> None:
+        """The pin's identity check is what makes the flag degradation safe."""
+        real_dir = tmp_path / "trust"
+        real_dir.mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+        real_lstat = os.lstat
+
+        def swapped_lstat(path, *args, **kwargs):
+            # Stands in for a swap landing between the open and the identity
+            # read: the name now reports a DIFFERENT real directory.
+            if Path(path) == real_dir:
+                return real_lstat(other)
+            return real_lstat(path, *args, **kwargs)
+
+        with patch.object(os, "lstat", swapped_lstat):
+            with pytest.raises(OSError, match="not the directory its name points at"):
+                sel_mod._pin_lock_dir(real_dir)
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
     def test_linked_trust_dir_is_removed_not_followed(self, tmp_path: Path) -> None:
@@ -2540,7 +2691,7 @@ class TestHmacKeyTrustDirMigration:
         # The lock falls back to the deny-list-protected legacy key, and must
         # NOT be allowed to create it (a 0-byte key would be promoted over the
         # real one by the migration block).
-        assert log._chain_lock_target() == (tmp_path / "sel_hmac.key", False)
+        assert log._chain_lock_target() == (tmp_path / "sel_hmac.key", False, None)
 
         log.log_tool_invocation(
             session_key="dashboard:slot1",
@@ -2595,11 +2746,13 @@ class TestHmacKeyTrustDirMigration:
         log = SecurityEventLog(base_dir=base_dir, sync=True)
 
         # The real sidecar is used -- not the legacy-key fallback, and no raise.
-        lock_path, may_create = log._chain_lock_target()
+        lock_path, may_create, lock_dir_fd = log._chain_lock_target()
         assert (lock_path, may_create) == (
             trust_dir / sel_mod._SEL_LOCK_FILE,
             True,
         )
+        if lock_dir_fd is not None:
+            os.close(lock_dir_fd)
 
         log.log_tool_invocation(
             session_key="dashboard:slot1",
