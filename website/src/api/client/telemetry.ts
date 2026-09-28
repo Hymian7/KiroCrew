@@ -118,9 +118,8 @@ export function createTelemetryEndpoints({ post, j }: ClientTransport) {
   }
 
   const kiroUsage = {
-    // Optional integrations — backend endpoints are graceful no-ops on a public
-    // install (AIM / kiro usage are stubbed). Kept so the UI compiles and
-    // degrades gracefully (panels render empty when the feature is absent).
+    // A graceful no-op on a public install, where Kiro usage is stubbed; the
+    // panels render empty when the feature is absent.
     kiroUsage: () => fetch('/api/usage/kiro').then(j),
   }
 

@@ -9,7 +9,6 @@ import type { ClientTransport } from './transport'
 
 export function createSourceControlEndpoints({ post, j }: ClientTransport) {
   const providers = {
-    // Chat
     pullRequestSource: (url: string, refresh = false) => post('/api/source/pull-request', { url, refresh }).then(j) as Promise<PullRequestSource>,
     pullRequestChecks: (url: string) => post('/api/source/pull-request/checks', { url }).then(j) as Promise<{ checks: PullRequestCheck[] }>,
     pullRequestStatuses: (urls: string[]) => post('/api/source/pull-request/status', { urls }).then(j) as Promise<PullRequestStatusBatch>,

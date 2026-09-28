@@ -37,8 +37,10 @@ Rotation-on-use races when a refresh POST is duplicated (network retry / double-
 ### Dashboard client: who owns browser-side recovery
 
 The browser half of refresh and re-authentication is split by responsibility
-across a few frontend owners. None of them authorizes anything: the middleware
-is the only gate, and `X-Session-Key: dashboard:ui` stays correlation metadata.
+across a few frontend owners. None of them authorizes anything: authorization
+stays on the gateway, in the token middleware and in the handler-level owner
+gate whose `owner_only` and `stale_session_reauth` refusals the client only
+surfaces, and `X-Session-Key: dashboard:ui` stays correlation metadata.
 
 | Responsibility | Owner |
 |---|---|

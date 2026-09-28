@@ -8,6 +8,8 @@ import type { ClientTransport } from './transport'
 
 export function createCapabilityManagerEndpoints({ post, j }: ClientTransport) {
   const catalog = {
+    // Graceful no-ops on a public install, where AIM is stubbed; the panels
+    // render empty when the feature is absent.
     capabilityMcpList: () => fetch('/api/capability/mcp').then(j),
     capabilityMcpInstall: (serverId: string) => post('/api/capability/mcp/install', { server_id: serverId }).then(j),
     capabilityMcpUninstall: (serverId: string) => post('/api/capability/mcp/uninstall', { server_id: serverId }).then(j),
