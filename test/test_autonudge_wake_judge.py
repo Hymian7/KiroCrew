@@ -164,14 +164,189 @@ class TestMappingTable:
     def test_quiet_outcomes_are_the_only_quiet(self, value: str) -> None:
         assert point.map_answers(answers(outcome=value)).outcome is Outcome.QUIET
 
-    def test_quiet_is_an_allowlist(self) -> None:
-        """No outcome outside :data:`QUIET_OUTCOMES` can produce silence."""
+    def test_quiet_is_exactly_the_two_rules_that_produce_it(self) -> None:
+        """Which answers are silent, as an if-and-only-if over the WHOLE answer space.
+
+        This replaces an earlier sweep that asserted one direction only -- no outcome
+        outside :data:`QUIET_OUTCOMES` may be silent -- and it is deliberately STRONGER
+        than what it replaces, in three ways. It sweeps both ``needs_owner`` answers and
+        both probabilities independently rather than the outcome's alone; it asserts
+        equality rather than non-membership, so an answer that SHOULD be silent and
+        wakes fails here too; and it carries no allowlist, exception or skip, so a
+        future rule that quietly widens what may be suppressed cannot slip through as
+        one more admitted case.
+
+        The predicate below is the mapping's quiet condition written out. Two rules
+        produce silence and nothing else may:
+
+        * a :data:`QUIET_OUTCOMES` outcome at or above :data:`OUTCOME_MIN_P`;
+        * an :data:`ACTION_OUTCOMES` outcome under :data:`ACTION_OVERRIDE_MIN_P` whose
+          ``needs_owner`` answered ``quiet`` AND cleared :data:`NEEDS_OWNER_MIN_P` --
+          the owner's own confident criterion standing against a question that carries
+          no criterion.
+
+        So ``finished`` and ``broken`` are silent at no confidence and under no
+        ``needs_owner`` answer, an unsure outcome always wakes, and an unsure quiet
+        never suppresses an action outcome.
+        """
+
+        def expect_quiet(owner: str, owner_p: float, value: str, outcome_p: float) -> bool:
+            if outcome_p < point.OUTCOME_MIN_P:
+                return False  # rule 2: an unsure judge hands the tick over
+            if owner == point.NEEDS_OWNER_WAKE and owner_p >= point.NEEDS_OWNER_MIN_P:
+                return False  # rule 3: the owner's criterion asked for the turn
+            if value in point.ACTION_OUTCOMES:
+                return (
+                    owner == point.NEEDS_OWNER_QUIET
+                    and owner_p >= point.NEEDS_OWNER_MIN_P
+                    and outcome_p < point.ACTION_OVERRIDE_MIN_P
+                )
+            return value in point.QUIET_OUTCOMES
+
+        probabilities = (0.0, 0.39, 0.4, 0.41, 0.49, 0.5, 0.59, 0.6, 0.75, 1.0)
+        seen_quiet = 0
         for value in point.OUTCOME_OPTIONS:
-            if value in point.QUIET_OUTCOMES:
-                continue
-            for probability in (0.41, 0.5, 0.59, 0.75, 1.0):
-                verdict = point.map_answers(answers(outcome=value, outcome_p=probability))
-                assert verdict.outcome is not Outcome.QUIET, (value, probability)
+            for owner in point.NEEDS_OWNER_OPTIONS:
+                for owner_p in probabilities:
+                    for outcome_p in probabilities:
+                        verdict = point.map_answers(
+                            answers(
+                                owner=owner,
+                                owner_p=owner_p,
+                                outcome=value,
+                                outcome_p=outcome_p,
+                            )
+                        )
+                        want = expect_quiet(owner, owner_p, value, outcome_p)
+                        assert (verdict.outcome is Outcome.QUIET) is want, (
+                            value,
+                            owner,
+                            owner_p,
+                            outcome_p,
+                            verdict.outcome,
+                        )
+                        seen_quiet += int(want)
+        # A control on the sweep itself: a predicate that never expects silence would
+        # make every assertion above trivially true.
+        assert seen_quiet > 0
+
+    def test_a_confident_owner_quiet_survives_a_barely_confident_action_outcome(self) -> None:
+        """The defect this bar exists for, at the numbers it was measured at.
+
+        Eleven wakes in one logged window came only from the ``ACTION_OUTCOMES``
+        clause, every one of them over a ``needs_owner`` that answered ``quiet``, and
+        eight of those had ``outcome`` under 0.52 -- barely over the shared floor of
+        0.40. A red pull request under repair answers ``needs_action`` every tick, so
+        the veto fired for the whole repair.
+        """
+        verdict = point.map_answers(
+            answers(
+                owner=point.NEEDS_OWNER_QUIET,
+                owner_p=0.9,
+                outcome=point.OUTCOME_NEEDS_ACTION,
+                outcome_p=0.45,
+            )
+        )
+        assert verdict.outcome is Outcome.QUIET
+        # Both answers in the body: the reader of a suppressed tick has to be able to
+        # see WHICH two readings disagreed, or the suppression is unexplainable.
+        assert "0.90" in verdict.body and "0.45" in verdict.body
+        assert point.OUTCOME_NEEDS_ACTION in verdict.body
+
+    def test_an_action_outcome_at_the_override_bar_still_wakes(self) -> None:
+        verdict = point.map_answers(
+            answers(
+                owner=point.NEEDS_OWNER_QUIET,
+                owner_p=0.9,
+                outcome=point.OUTCOME_NEEDS_ACTION,
+                outcome_p=point.ACTION_OVERRIDE_MIN_P,
+            )
+        )
+        assert verdict.outcome is Outcome.WAKE
+
+    def test_an_unsure_outcome_still_wakes_under_a_confident_owner_quiet(self) -> None:
+        """Rule 2 is untouched: below the shared floor the call goes to the session.
+
+        The new bar narrows one backstop. It must not reach underneath
+        :data:`OUTCOME_MIN_P`, where an unsure judge has always handed the tick to the
+        main session rather than guessing quiet.
+        """
+        verdict = point.map_answers(
+            answers(
+                owner=point.NEEDS_OWNER_QUIET,
+                owner_p=0.9,
+                outcome=point.OUTCOME_NEEDS_HUMAN,
+                outcome_p=point.OUTCOME_MIN_P - 0.05,
+            )
+        )
+        assert verdict.outcome is Outcome.WAKE
+        assert "unsure" in verdict.body
+
+    def test_a_below_bar_owner_wake_is_not_a_quiet_answer(self) -> None:
+        """Only ``needs_owner``'s VALUE being ``quiet`` may withhold the backstop.
+
+        A ``wake`` answer that missed :data:`NEEDS_OWNER_MIN_P` fires no rule of its
+        own, but nobody asserted the owner can be left alone either, so the
+        unconditional action backstop still applies to it.
+        """
+        verdict = point.map_answers(
+            answers(
+                owner=point.NEEDS_OWNER_WAKE,
+                owner_p=point.NEEDS_OWNER_MIN_P - 0.01,
+                outcome=point.OUTCOME_NEEDS_ACTION,
+                outcome_p=0.45,
+            )
+        )
+        assert verdict.outcome is Outcome.WAKE
+
+    def test_the_override_bar_sits_above_the_confidence_floor(self) -> None:
+        """A bar at or under the floor would be unreachable and change nothing."""
+        assert point.ACTION_OVERRIDE_MIN_P > point.OUTCOME_MIN_P
+
+    def test_the_override_bar_covers_the_measured_range_at_literal_numbers(self) -> None:
+        """The bar's VALUE, pinned at literal probabilities rather than through itself.
+
+        Every other assertion here spells the threshold as ``ACTION_OVERRIDE_MIN_P``, so
+        all of them stay green if the constant is lowered -- and a drop to 0.5 would let
+        back exactly the 0.50-0.59 band the logged verdicts were found in. These
+        numbers are literal so that a change to the constant has to be made here too,
+        in the open.
+        """
+        assert point.ACTION_OVERRIDE_MIN_P == 0.6
+        confident_quiet = {"owner": point.NEEDS_OWNER_QUIET, "owner_p": 0.94}
+        for probability in (0.41, 0.48, 0.5, 0.52, 0.59):
+            verdict = point.map_answers(
+                answers(
+                    outcome=point.OUTCOME_NEEDS_ACTION, outcome_p=probability, **confident_quiet
+                )
+            )
+            assert verdict.outcome is Outcome.QUIET, probability
+        for probability in (0.6, 0.61, 0.9):
+            verdict = point.map_answers(
+                answers(
+                    outcome=point.OUTCOME_NEEDS_ACTION, outcome_p=probability, **confident_quiet
+                )
+            )
+            assert verdict.outcome is Outcome.WAKE, probability
+
+    def test_an_unsure_owner_quiet_cannot_suppress_an_action_outcome(self) -> None:
+        """The quiet answer must clear its OWN bar before it withholds a wake.
+
+        ``NEEDS_OWNER_MIN_P`` is enforced literally rather than assumed from a
+        two-option argmax, precisely because a provider may return a non-argmax choice.
+        Such a ``quiet`` answer asserts nothing anyone was sure of, so it must not buy
+        silence about a ``needs_human`` tick -- the owner would otherwise hear nothing
+        until the quiet-streak floor.
+        """
+        verdict = point.map_answers(
+            answers(
+                owner=point.NEEDS_OWNER_QUIET,
+                owner_p=0.01,
+                outcome=point.OUTCOME_NEEDS_HUMAN,
+                outcome_p=0.59,
+            )
+        )
+        assert verdict.outcome is Outcome.WAKE
 
     def test_terminal_bar_is_above_the_confidence_floor(self) -> None:
         """Ordering still matters, for the wording rather than for the outcome.

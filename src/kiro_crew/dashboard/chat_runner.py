@@ -19971,18 +19971,22 @@ async def _run_chat(
 
             _autonudge = _autonudge_get()
             if _autonudge is not None:
-                # The two facts only this frame holds: how many tools the turn
-                # dispatched and what it answered. The wake judge's feedback loop
-                # labels its own verdict from them -- a woken turn that called
-                # nothing and answered short is the quiet-cycle shape the judge
-                # should have suppressed. Passed as keywords so a build whose
-                # service predates them is unaffected, and neither is retained: the
-                # service reduces both to one boolean.
+                # The facts only this frame holds: what the turn dispatched and what
+                # it answered. The wake judge's feedback loop labels its own verdict
+                # from them -- a woken turn that changed nothing and answered short
+                # is the quiet-cycle shape the judge should have suppressed. The
+                # IDENTITIES go with the count because a count alone cannot tell a
+                # read from a write, which made that label constant-true; this is the
+                # same tuple the read-only-preparation check already reads, so the
+                # names cost nothing extra to collect. Passed as keywords so a build
+                # whose service predates them is unaffected, and none is retained: the
+                # service reduces them to one boolean and two numbers.
                 # A nudge turn labels its verdict only when its response lands;
                 # failed and cancelled turns keep the retry unlabelled.
                 _autonudge.notify_turn_complete(
                     slot.key,
                     tool_calls=_turn_tool_calls,
+                    tool_identities=tuple(_turn_tool_identities),
                     reply_text=assistant_text if isinstance(assistant_text, str) else "",
                     reply_flushed=_turn_flushed_visible_text,
                     nudge_turn=_directive_self_wake and _turn_landed,

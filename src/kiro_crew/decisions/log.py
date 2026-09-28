@@ -295,6 +295,7 @@ def build_wake_label_row(
     value: bool,
     tool_calls: int | None,
     reply_chars: int,
+    tool_names_known: bool = False,
     position_back: int | None = None,
     age_s: float | None = None,
 ) -> dict[str, Any]:
@@ -315,8 +316,14 @@ def build_wake_label_row(
     Carries no reply, no transcript and no target. ``tool_calls`` is a non-negative
     count or ``None`` when the count is unknown; ``reply_chars`` is the stripped reply
     length. A ``missed`` row also carries its numeric position and age behind the
-    delivery that labels it. Every input is reduced to a number or null before the row
-    is returned.
+    delivery that labels it. Every input is reduced to a number, a boolean or null
+    before the row is returned.
+
+    ``tool_names_known`` says whether the label was decided from NAMED dispatches --
+    which is what lets a read-only call be told from a write -- or from a bare count,
+    which cannot tell them apart and labels every dispatching turn acted. A threshold
+    read must EXCLUDE the false rows rather than pool them: the two were decided by two
+    different rules, and pooling them reads a constant label as a measurement.
     """
     moment = datetime.now(timezone.utc)
     tool_count = (
@@ -339,6 +346,7 @@ def build_wake_label_row(
         "value": value is True,
         "tool_calls": tool_count,
         "reply_chars": reply_length,
+        "tool_names_known": tool_names_known is True,
     }
     if label == "missed":
         row["position_back"] = (

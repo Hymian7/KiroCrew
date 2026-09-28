@@ -43,11 +43,12 @@ import re
 import secrets
 import time
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from kiro_crew import validation as _validation
 from kiro_crew.decisions.log import MAX_VERDICT_ID_CHARS as _MAX_VERDICT_ID_CHARS
 from kiro_crew.decisions.points import nudge_wake as point
+from kiro_crew.hooks import _HOST_READ_ONLY_BUILTIN_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -1018,13 +1019,198 @@ def verdict_record(verdict: Any, evidence_items: int) -> dict[str, Any]:
 #: streak the service can produce. ``test_wake_judge_feedback`` pins the two together.
 MAX_STORED_VERDICTS = 11
 
-#: A reply at or under this length, from a turn that called no tool, is the quiet-cycle
-#: shape: the loop woke, the owner looked, there was nothing to do, and the turn said
-#: so. Calibrated against what such a reply actually is -- one or two sentences -- and
-#: deliberately generous, because the direction to be wrong in is calling a real turn
-#: quiet rather than the reverse. A false ``owner_acted`` teaches the judge that a wake
-#: was warranted, which costs turns; a false quiet teaches it to suppress.
+#: A reply at or under this length, from a turn that changed nothing, is the
+#: quiet-cycle shape: the loop woke, the owner looked, there was nothing to do, and the
+#: turn said so. Calibrated against what such a reply actually is -- one or two
+#: sentences -- and deliberately generous, because the direction to be wrong in is
+#: calling a real turn quiet rather than the reverse. A false ``owner_acted`` teaches
+#: the judge that a wake was warranted, which costs turns; a false quiet teaches it to
+#: suppress.
 QUIET_REPLY_MAX_CHARS = 280
+
+#: Read-only BUILT-IN tool names, in BOTH vocabularies a dispatch can arrive in:
+#: kiro-cli's own names and the KAS tool ids for the same jobs.
+#:
+#: The kiro-cli half is the approval gate's OWN set, not a copy of it. That set is
+#: pinned by ``test_host_read_only_builtins_map_only_to_read_scopes`` to names whose
+#: ``governance.BUILTIN_TOOL_SCOPES`` row is read-only, so a write-capable built-in
+#: cannot enter this allowlist through it -- which is worth more here than convenience:
+#: a hand-spelled copy admitted ``code``, a tool that writes files and can shell out,
+#: and a turn whose only dispatch edited the tree would have been labelled a quiet
+#: cycle. Only the KAS ids are spelled here, because the table that owns that mapping
+#: lives under ``acp`` and the agent-SDK boundary keeps application code off that layer;
+#: ``test_wake_judge_feedback`` joins the two instead, which is where a "these must
+#: agree" assertion belongs anyway -- a test may read both sides.
+#:
+#: An ALLOWLIST, and the direction matters: a name off this set counts as having
+#: changed something. Soundness is what this set needs, not completeness -- every entry
+#: must genuinely change nothing, while a read-only tool it has not heard of merely
+#: labels that turn acted, which is the error this label already errs toward.
+READ_ONLY_BUILTIN_TOOLS: frozenset[str] = _HOST_READ_ONLY_BUILTIN_TOOLS | frozenset(
+    {
+        # ``fs_read``'s short spelling, from kiro-cli's own alias table.
+        "read",
+        # The KAS tool ids for the same jobs, which is what a KAS session states.
+        "read_file",
+        "list_directory",
+        "grep_search",
+        "file_search",
+        "remote_web_search",
+    }
+)
+
+#: Read-only MCP tool names: a call that only READS the loop's own surroundings --
+#: another session's messages, this session's own ledger, a monitor's state, memory.
+#: Matched only for a call that carries a server name, so a built-in named ``fs_write``
+#: can never be read off this set.
+#:
+#: Matched by bare name rather than by ``(server, tool)`` pair, because the server
+#: string is configuration and pinning it here would make a rename read as a mutating
+#: call. The cost of that looseness is bounded and is not a security one: an installed
+#: MCP server that named a WRITING tool ``memory_recall`` would have one of its calls
+#: under-counted in a calibration label. It reaches no approval decision.
+READ_ONLY_MCP_TOOLS: frozenset[str] = frozenset(
+    {
+        "memory_recall",
+        "learn_list",
+        "session_ledger_read",
+        "work_ledger_read",
+        "work_brief",
+        "ledger_read",
+        "monitor_inspect",
+        "spawn_status",
+        "spawn_list",
+        "session_read_message",
+        "skill_search",
+        "local_knowledge_search",
+        "knowledge_list_sources",
+        "resource_status",
+        "artifact_get",
+        "artifact_list",
+        "artifact_versions",
+        "artifact_get_comments",
+        "issue_radar_crew_read",
+        "pod_ls",
+        "pod_status",
+        "search_chat_history",
+        "get_chat_session",
+        "list_sessions",
+        "cron_list",
+        "kiro_cli_logs",
+    }
+)
+
+
+def tool_changed_something(
+    tool_name: object,
+    server_name: object = "",
+    *,
+    identity_trusted: bool = True,
+) -> bool:
+    """Whether ONE dispatched tool call could have changed anything.
+
+    The read side of :func:`owner_acted`'s rule, split out so the classification is
+    testable on its own and stated once. ``True`` for every name this module does not
+    positively know to be read-only, which is the direction the label as a whole errs
+    in: a mutating call missed as read-only teaches the judge to suppress, while a read
+    counted as mutating only costs the calibration curve one flat row.
+
+    Two tiers, and the built-in one is strict for the reason
+    ``hooks._is_host_read_only_builtin`` is: an MCP server controls its own tool names,
+    so a *server-named* ``fs_read`` is prose rather than identity. A built-in claim
+    therefore needs an empty server name AND trusted provenance for the pair; without
+    the flag the name proves nothing and the call counts as mutating.
+    """
+    name = tool_name.strip() if isinstance(tool_name, str) else ""
+    server = server_name.strip() if isinstance(server_name, str) else ""
+    if not name:
+        return True
+    if server:
+        return name not in READ_ONLY_MCP_TOOLS
+    if not identity_trusted:
+        return True
+    return name not in READ_ONLY_BUILTIN_TOOLS
+
+
+def tool_identities_are_named(tool_identities: object) -> bool:
+    """Whether EVERY dispatch in this reading carries a usable tool name.
+
+    This is not "was a sequence supplied": an adapter may hand over one row per
+    dispatch and name none of them. ``claude-agent-acp`` and ``opencode`` send
+    ``kind="other"`` with no identity channel at all, so
+    ``_dispatch.classify_tool_call`` yields an empty ``tool_name`` and the runner
+    still appends a row per call. A reading like that is decided by exactly the
+    count-only rule :func:`owner_acted` falls back to, so recording it as
+    name-derived would put count-only rows into the calibration corpus under the
+    flag that exists to keep them out -- and that log is append-only, so the
+    mislabelled row is never repaired.
+
+    Hence ALL, not any: one unnamed dispatch makes the whole turn's reading
+    count-derived, because the label is one boolean over the whole turn and a
+    turn whose write went unnamed is exactly the turn a curve must not trust.
+
+    An EMPTY sequence is named, vacuously: the turn dispatched nothing, so the
+    count and the named reading agree on zero and neither is guessing.
+
+    The opposite direction from :func:`mutating_tool_count`, on purpose. An
+    unreadable dispatch is not evidence the turn was idle, so it counts as
+    mutating there; it is also not evidence anyone knew what it was, so it counts
+    as unnamed here. Two questions, each failing toward the answer that cannot
+    teach the judge to stay quiet.
+    """
+    if tool_identities is None or isinstance(tool_identities, (str, bytes, Mapping)):
+        return False
+    if not isinstance(tool_identities, Iterable):
+        return False
+    try:
+        rows = list(tool_identities)
+    except TypeError:
+        return False
+    for row in rows:
+        if isinstance(row, (str, bytes)) or not isinstance(row, Sequence):
+            return False
+        fields = list(row)
+        name = fields[2] if len(fields) > 2 else ""
+        if not (isinstance(name, str) and name.strip()):
+            return False
+    return True
+
+
+def mutating_tool_count(tool_identities: object) -> int | None:
+    """How many of a turn's dispatches changed something, or ``None`` if unknowable.
+
+    *tool_identities* is the runner's own per-dispatch tuple sequence,
+    ``(tool_call_id, server_name, tool_name, identity_trusted)`` -- the shape
+    ``chat_runner`` already accumulates for its read-only-preparation check, so this
+    consumes an existing reading rather than asking for a second one.
+
+    ``None`` when no sequence is supplied at all, which is the honest answer for a
+    caller that only counted. A caller that supplied an EMPTY sequence is saying the
+    turn dispatched nothing, and that is a real zero rather than an unknown.
+    """
+    if tool_identities is None or isinstance(tool_identities, (str, bytes, Mapping)):
+        return None
+    if not isinstance(tool_identities, Iterable):
+        return None
+    try:
+        rows = list(tool_identities)
+    except TypeError:
+        return None
+    mutating = 0
+    for row in rows:
+        if isinstance(row, (str, bytes)) or not isinstance(row, Sequence):
+            # A row this function cannot read names no tool, and an unreadable
+            # dispatch is not evidence that the turn was idle.
+            mutating += 1
+            continue
+        fields = list(row)
+        server = fields[1] if len(fields) > 1 else ""
+        name = fields[2] if len(fields) > 2 else ""
+        trusted = fields[3] is True if len(fields) > 3 else False
+        if tool_changed_something(name, server, identity_trusted=trusted):
+            mutating += 1
+    return mutating
+
 
 #: Longest verdict id a stored row keeps. One spelling, held in
 #: :mod:`kiro_crew.decisions.log`, so the stored row's ``id`` and the ``verdict_id`` on
@@ -1037,12 +1223,21 @@ def owner_action_reading(
     reply_text: object,
     *,
     reply_flushed: bool = False,
-) -> tuple[bool, int | None, int]:
+    tool_identities: object = None,
+) -> tuple[bool, int | None, int, bool]:
     """The action label and the text-free inputs from which it is derived.
 
     The tool-call count is ``None`` when it is unknown. The reply measurement is the
-    stripped character count, never the reply or a fragment of it. Returning all three
-    from one reading keeps the durable calibration row aligned with the boolean label.
+    stripped character count, never the reply or a fragment of it. The fourth value is
+    whether the dispatches were NAMED, by :func:`tool_identities_are_named`: a
+    calibration read excludes the rows where they were not, because those were decided
+    by the count-only rule and a curve that pools the two measures two rules as one.
+    It is emphatically not "a sequence was supplied" -- an adapter can hand over a row
+    per dispatch and name none of them, and calling that name-derived is how a
+    count-only row reaches the corpus under the flag that exists to exclude it.
+
+    Returning all four from one reading keeps the durable calibration row aligned with
+    the boolean label.
     """
     tool_count = (
         tool_calls
@@ -1052,31 +1247,53 @@ def owner_action_reading(
     text = reply_text if isinstance(reply_text, str) else ""
     stripped = text.strip()
     reply_chars = len(stripped)
-    acted = owner_acted(tool_calls, reply_text, reply_flushed=reply_flushed)
-    return acted, tool_count, reply_chars
+    names_known = tool_identities_are_named(tool_identities)
+    acted = owner_acted(
+        tool_calls,
+        reply_text,
+        reply_flushed=reply_flushed,
+        tool_identities=tool_identities,
+    )
+    return acted, tool_count, reply_chars, names_known
 
 
-def owner_acted(tool_calls: object, reply_text: object, *, reply_flushed: bool = False) -> bool:
-    """Whether the woken turn DID anything. The whole rule, in one function.
+def owner_acted(
+    tool_calls: object,
+    reply_text: object,
+    *,
+    reply_flushed: bool = False,
+    tool_identities: object = None,
+) -> bool:
+    """Whether the woken turn CHANGED anything. The whole rule, in one function.
 
     Deterministic and model-free, which is what makes it usable as a label: two
     readings of the same turn agree, and a curve built from these labels measures the
     judge rather than a second judge's opinion of it.
 
-    ``True`` when the turn called at least one tool, or when its reply is longer than
-    the quiet-cycle shape (:data:`QUIET_REPLY_MAX_CHARS`) or carries a link. ``False``
-    only for a turn that called nothing and answered short -- which is exactly the
-    reply a loop produces when it wakes, looks, and finds nothing for its owner.
+    ``True`` when the turn dispatched at least one tool that could have changed
+    something, or when its reply is longer than the quiet-cycle shape
+    (:data:`QUIET_REPLY_MAX_CHARS`) or carries a link. ``False`` only for a turn that
+    changed nothing and answered short -- which is exactly the reply a loop produces
+    when it wakes, looks, and finds nothing for its owner.
+
+    A COUNT is not the rule, and the reason is that counting every dispatch makes the
+    label constant: a turn whose only call is a ``fs_read`` and whose reply is a
+    124-character status line scores acted, which is the quiet-cycle shape itself. A
+    label with no variance measures nothing, and this is the label the thresholds in
+    :mod:`~kiro_crew.decisions.points.nudge_wake` are tuned from. So when the dispatches
+    are NAMED (*tool_identities*, the runner's own per-dispatch tuples) only the ones
+    that :func:`tool_changed_something` admits are counted, and looking is not acting.
 
     A turn that CHANGED the loop needs no separate signal: ``monitor_update`` and
-    ``autonudge_stop`` are tool calls, so the count already carries them. Reading them
-    a second way would be a second rule that can disagree with this one.
+    ``autonudge_stop`` are not read-only, so the mutating count already carries them.
+    Reading them a second way would be a second rule that can disagree with this one.
 
-    An UNKNOWN tool-call count -- no count passed, an older caller, a turn whose runner
-    never reached the hook -- reads as acted. The count is the strong half of the rule,
-    so without it the honest answer is that this turn cannot be shown to have been
-    idle, and the cheap direction to be wrong in is the one that does not teach the
-    judge to stay quiet.
+    UNNAMED dispatches read as acted on the old count alone -- an older caller, a
+    runner that never reached the hook, a build whose service predates the names. So
+    does an unknown *tool_calls* count. Both are the same honest answer: this turn
+    cannot be SHOWN to have been idle, and the cheap direction to be wrong in is the
+    one that does not teach the judge to stay quiet. Those rows are distinguishable in
+    the log rather than silently pooled -- see ``owner_action_reading``'s fourth value.
 
     When *reply_flushed* is true, an earlier segment already left the screen, so the
     text in hand is not the whole reply and cannot be judged short. Erring toward
@@ -1090,12 +1307,16 @@ def owner_acted(tool_calls: object, reply_text: object, *, reply_flushed: bool =
         if isinstance(tool_calls, int) and not isinstance(tool_calls, bool) and tool_calls >= 0
         else None
     )
+    mutating = mutating_tool_count(tool_identities)
+    # The named reading REPLACES the count when it exists; the count is the fallback for
+    # a caller that could not name them. Taking whichever is larger would put the old
+    # defect back: every read-only turn carries a positive count.
+    acted_by_tools = tool_count is None or tool_count > 0 if mutating is None else mutating > 0
     text = reply_text if isinstance(reply_text, str) else ""
     stripped = text.strip()
     return (
         reply_flushed
-        or tool_count is None
-        or tool_count > 0
+        or acted_by_tools
         or len(stripped) > QUIET_REPLY_MAX_CHARS
         or "http://" in stripped
         or "https://" in stripped

@@ -134,8 +134,303 @@ class TestOwnerActed:
         reply = "  a reply that the shared rule alone classifies  "
         reading = judge.owner_action_reading(1, reply, reply_flushed=True)
 
-        assert reading == (False, 1, len(reply.strip()))
-        assert calls == [((1, reply), {"reply_flushed": True})]
+        # Fourth value: whether the dispatches were NAMED. Nothing was passed here, so
+        # the label came from the count alone and a threshold read must exclude it.
+        assert reading == (False, 1, len(reply.strip()), False)
+        assert calls == [
+            ((1, reply), {"reply_flushed": True, "tool_identities": None}),
+        ]
+
+
+class TestMutatingToolReading:
+    """Which dispatches count as having changed something, and which merely looked.
+
+    The label this feeds was constant-true across 84 of 84 labelled verdicts, because a
+    COUNT cannot tell a read from a write: a turn whose only call was one read plus a
+    124-character status reply scored acted. These pin the discrimination the count
+    could not express.
+    """
+
+    @staticmethod
+    def _builtin(name: str) -> tuple[str, str, str, bool]:
+        """One dispatch of a trusted BUILT-IN, in the runner's own tuple shape."""
+        return (f"tc-{name}", "", name, True)
+
+    @staticmethod
+    def _mcp(name: str, server: str = "kirocrew-core") -> tuple[str, str, str, bool]:
+        return (f"tc-{name}", server, name, True)
+
+    @pytest.mark.parametrize("name", ["fs_read", "read_file", "grep", "grep_search", "glob"])
+    def test_a_read_only_builtin_changed_nothing(self, name):
+        assert judge.tool_changed_something(name, "", identity_trusted=True) is False
+
+    @pytest.mark.parametrize("name", ["fs_write", "str_replace", "delete_file", "execute_bash"])
+    def test_a_writing_builtin_changed_something(self, name):
+        assert judge.tool_changed_something(name, "", identity_trusted=True) is True
+
+    def test_an_unknown_builtin_name_changed_something(self):
+        """The allowlist's direction: unheard-of means it counts.
+
+        Soundness is what the set needs. A read-only tool it has not heard of labels
+        that turn acted, which is the error this label already errs toward; the reverse
+        would teach the judge to suppress.
+        """
+        assert judge.tool_changed_something("some_new_tool", "", identity_trusted=True) is True
+
+    def test_an_untrusted_builtin_identity_changed_something(self):
+        """A name with no provenance behind it is prose, not identity.
+
+        The same three-fact discipline ``hooks._is_host_read_only_builtin`` applies: an
+        unverified pair says nothing about who named the tool.
+        """
+        assert judge.tool_changed_something("fs_read", "", identity_trusted=False) is True
+
+    def test_a_server_named_fs_read_is_not_read_off_the_builtin_set(self):
+        """An MCP server controls its own tool names, so it cannot borrow one."""
+        assert judge.tool_changed_something("fs_read", "some-server", identity_trusted=True) is True
+
+    @pytest.mark.parametrize("name", ["memory_recall", "monitor_inspect", "spawn_status"])
+    def test_a_read_only_mcp_tool_changed_nothing(self, name):
+        assert judge.tool_changed_something(name, "kirocrew-core", identity_trusted=True) is False
+
+    @pytest.mark.parametrize("name", ["send_message", "monitor_update", "learn_add"])
+    def test_a_writing_mcp_tool_changed_something(self, name):
+        assert judge.tool_changed_something(name, "kirocrew-core", identity_trusted=True) is True
+
+    def test_an_empty_name_changed_something(self):
+        assert judge.tool_changed_something("", "", identity_trusted=True) is True
+
+    def test_no_name_in_the_read_only_set_holds_a_write_scope(self):
+        """The assertion that catches a write-capable tool entering the allowlist.
+
+        A hand-spelled version of this set admitted ``code``, which
+        ``governance.BUILTIN_TOOL_SCOPES`` maps to ``filesystem.write`` and
+        ``commands``; a turn whose only dispatch edited the tree would then have been
+        labelled a quiet cycle, which is the direction :func:`owner_acted` documents as
+        the harmful one. The permissions-table join below could not catch it, because
+        ``code`` has no row in ``KAS_TOOL_IDS_BY_KIRO_TOOL``.
+
+        Names with no scope row are not covered here -- the KAS ids have none -- so this
+        sits alongside that join rather than replacing it.
+        """
+        from kiro_crew.platform.governance import BUILTIN_TOOL_SCOPES
+
+        write_scopes = {"filesystem.write", "commands", "tools"}
+        covered = 0
+        for name in judge.READ_ONLY_BUILTIN_TOOLS:
+            scopes = BUILTIN_TOOL_SCOPES.get(name)
+            if scopes is None:
+                continue
+            covered += 1
+            assert not (set(scopes) & write_scopes), (name, scopes)
+        # A control: the sweep above is vacuous if no name has a row at all.
+        assert covered >= 5, covered
+        # And the tool that got through before is named, so this cannot pass by the
+        # scope table losing its row.
+        assert "code" in BUILTIN_TOOL_SCOPES
+        assert "code" not in judge.READ_ONLY_BUILTIN_TOOLS
+
+    def test_the_builtin_half_is_the_approval_gate_s_own_set(self):
+        """Not a copy of it: a copy is what admitted a write-capable tool."""
+        from kiro_crew.hooks import _HOST_READ_ONLY_BUILTIN_TOOLS
+
+        assert _HOST_READ_ONLY_BUILTIN_TOOLS
+        assert _HOST_READ_ONLY_BUILTIN_TOOLS <= judge.READ_ONLY_BUILTIN_TOOLS
+
+    def test_the_read_only_builtin_set_agrees_with_the_permissions_table(self):
+        """The judge's literal set is held in step with the table that owns the mapping.
+
+        ``acp.kas_permissions`` is the one kiro-cli <-> KAS tool-name table, but the
+        agent-SDK boundary keeps application code off the ACP layer, so the judge cannot
+        derive its set from it. This assertion is the join instead: a test may read both
+        sides, so a renamed or added tool id breaks here rather than silently leaving a
+        stale spelling in the judge that classifies a live read as unknown.
+        """
+        from kiro_crew.acp import kas_permissions
+
+        read_only_kiro_names = ("fs_read", "grep", "glob", "web_fetch", "web_search")
+        for name in read_only_kiro_names:
+            assert name in judge.READ_ONLY_BUILTIN_TOOLS, name
+            for tool_id in kas_permissions.KAS_TOOL_IDS_BY_KIRO_TOOL[name]:
+                assert tool_id in judge.READ_ONLY_BUILTIN_TOOLS, tool_id
+        # Every alias of a read-only name is itself read-only, and no alias of a
+        # writing one leaked in.
+        for alias, target in kas_permissions.KIRO_TOOL_ALIASES.items():
+            if target in read_only_kiro_names:
+                assert alias in judge.READ_ONLY_BUILTIN_TOOLS, alias
+            else:
+                assert alias not in judge.READ_ONLY_BUILTIN_TOOLS, alias
+        # And the writing side is absent in both vocabularies.
+        for name, ids in kas_permissions.KAS_TOOL_IDS_BY_KIRO_TOOL.items():
+            if name in read_only_kiro_names:
+                continue
+            assert name not in judge.READ_ONLY_BUILTIN_TOOLS, name
+            for tool_id in ids:
+                assert tool_id not in judge.READ_ONLY_BUILTIN_TOOLS, tool_id
+
+    def test_the_count_is_of_mutating_dispatches_only(self):
+        rows = (
+            self._builtin("read_file"),
+            self._builtin("grep"),
+            self._builtin("fs_write"),
+            self._mcp("memory_recall"),
+        )
+        assert judge.mutating_tool_count(rows) == 1
+
+    def test_no_sequence_at_all_is_unknowable(self):
+        assert judge.mutating_tool_count(None) is None
+
+    def test_an_empty_sequence_is_a_real_zero(self):
+        """Empty is the runner saying the turn dispatched nothing, not a missing read."""
+        assert judge.mutating_tool_count(()) == 0
+
+    @pytest.mark.parametrize("bad", ["fs_read", b"fs_read", {"a": 1}])
+    def test_a_non_sequence_reading_is_unknowable(self, bad):
+        assert judge.mutating_tool_count(bad) is None
+
+    def test_an_unreadable_row_counts_as_mutating(self):
+        assert judge.mutating_tool_count(("not-a-row",)) == 1
+        assert judge.mutating_tool_count((("only-an-id",),)) == 1
+
+
+class TestOwnerActedWithNames:
+    """``owner_acted`` once the dispatches are named -- the defect and its fix."""
+
+    def test_one_read_and_a_short_reply_is_the_quiet_shape(self):
+        """The measured defect, at its measured shape.
+
+        One read-only call plus a 124-character status reply. This labelled True on the
+        count alone, which is how 84 of 84 rows came back True.
+        """
+        reply = "x" * 124
+        assert judge.owner_acted(1, reply) is True
+        assert (
+            judge.owner_acted(
+                1,
+                reply,
+                tool_identities=(("tc-1", "", "read_file", True),),
+            )
+            is False
+        )
+
+    def test_one_write_is_action(self):
+        assert (
+            judge.owner_acted(
+                1,
+                "done",
+                tool_identities=(("tc-1", "", "fs_write", True),),
+            )
+            is True
+        )
+
+    def test_a_read_only_turn_with_a_long_reply_is_still_action(self):
+        """The reply and link fallbacks are untouched by the names."""
+        assert (
+            judge.owner_acted(
+                1,
+                "x" * (judge.QUIET_REPLY_MAX_CHARS + 1),
+                tool_identities=(("tc-1", "", "read_file", True),),
+            )
+            is True
+        )
+        assert (
+            judge.owner_acted(
+                1,
+                "see https://example.invalid/x",
+                tool_identities=(("tc-1", "", "read_file", True),),
+            )
+            is True
+        )
+
+    def test_a_flushed_reply_is_still_action(self):
+        assert (
+            judge.owner_acted(
+                1,
+                "short",
+                reply_flushed=True,
+                tool_identities=(("tc-1", "", "read_file", True),),
+            )
+            is True
+        )
+
+    def test_unnamed_dispatches_keep_the_old_count_behaviour(self):
+        assert judge.owner_acted(1, "short") is True
+        assert judge.owner_acted(0, "short") is False
+        assert judge.owner_acted(None, "short") is True
+
+    def test_the_named_reading_replaces_the_count_rather_than_joining_it(self):
+        """Taking whichever is larger would put the defect straight back.
+
+        Every read-only turn carries a positive count, so an OR over the two readings
+        is the old rule wearing a new name.
+        """
+        assert (
+            judge.owner_acted(
+                9,
+                "short",
+                tool_identities=tuple(("tc", "", "read_file", True) for _ in range(9)),
+            )
+            is False
+        )
+
+    def test_the_reading_reports_that_the_names_were_known(self):
+        acted, tool_calls, reply_chars, names_known = judge.owner_action_reading(
+            1,
+            "short",
+            tool_identities=(("tc-1", "", "read_file", True),),
+        )
+        assert (acted, tool_calls, reply_chars, names_known) == (False, 1, 5, True)
+
+    def test_the_reading_reports_that_the_names_were_not_known(self):
+        acted, _tool_calls, _reply_chars, names_known = judge.owner_action_reading(1, "short")
+        assert (acted, names_known) == (True, False)
+
+    def test_rows_with_no_tool_name_are_not_named(self):
+        """The shape a backend with no identity channel produces.
+
+        ``claude-agent-acp`` and ``opencode`` send ``kind="other"`` with no identity, so
+        ``_dispatch.classify_tool_call`` yields an empty ``tool_name`` and
+        ``tool_identity_trusted`` is False, while the runner still appends one row per
+        dispatch. Reading "a sequence was supplied" as "the names were known" would mark
+        those turns name-derived and write count-only rows into an append-only
+        calibration log under the flag that exists to exclude them.
+        """
+        unnamed = (("tc-1", "", "", False),)
+        assert judge.tool_identities_are_named(unnamed) is False
+        _acted, _calls, _chars, names_known = judge.owner_action_reading(
+            1, "short", tool_identities=unnamed
+        )
+        assert names_known is False
+        # Still counted as having changed something: an unreadable dispatch is not
+        # evidence the turn was idle. The two questions fail in opposite directions.
+        assert judge.mutating_tool_count(unnamed) == 1
+
+    def test_one_unnamed_row_among_named_ones_makes_the_turn_unnamed(self):
+        """ALL, not any -- the label is one boolean over the whole turn."""
+        mixed = (
+            ("tc-1", "", "read_file", True),
+            ("tc-2", "", "", False),
+            ("tc-3", "", "fs_write", True),
+        )
+        assert judge.tool_identities_are_named(mixed) is False
+        assert judge.tool_identities_are_named(
+            (("tc-1", "", "read_file", True), ("tc-3", "", "fs_write", True))
+        )
+
+    @pytest.mark.parametrize("bad", [None, "fs_read", b"fs_read", {"a": 1}, ("not-a-row",)])
+    def test_an_absent_or_unreadable_reading_is_not_named(self, bad):
+        assert judge.tool_identities_are_named(bad) is False
+
+    def test_an_empty_dispatch_list_is_vacuously_named(self):
+        """Nothing was dispatched, so the count and the named reading agree on zero."""
+        assert judge.tool_identities_are_named(()) is True
+        _acted, _calls, _chars, names_known = judge.owner_action_reading(
+            0, "short", tool_identities=()
+        )
+        assert names_known is True
+
+    def test_a_whitespace_only_tool_name_is_not_a_name(self):
+        assert judge.tool_identities_are_named((("tc-1", "", "   ", True),)) is False
 
 
 class TestVerdictEntry:
@@ -1267,7 +1562,39 @@ class TestWakeLabelRow:
             "value",
             "tool_calls",
             "reply_chars",
+            "tool_names_known",
         }
+
+    def test_the_row_says_whether_the_dispatches_were_named(self):
+        """A count-only label and a named one were decided by two different rules.
+
+        A threshold read that pools them measures a constant label as a measurement, so
+        the row has to say which rule produced it.
+        """
+        for known in (True, False):
+            row = decisions_log.build_wake_label_row(
+                verdict_id="a",
+                point="nudge.wake",
+                session_key="chat-1",
+                label="owner_acted",
+                value=True,
+                tool_calls=1,
+                reply_chars=0,
+                tool_names_known=known,
+            )
+            assert row["tool_names_known"] is known
+
+    def test_the_named_flag_defaults_to_false_for_an_older_caller(self):
+        row = decisions_log.build_wake_label_row(
+            verdict_id="a",
+            point="nudge.wake",
+            session_key="chat-1",
+            label="owner_acted",
+            value=True,
+            tool_calls=1,
+            reply_chars=0,
+        )
+        assert row["tool_names_known"] is False
 
     def test_it_does_not_accept_a_timestamp_override(self):
         with pytest.raises(TypeError):
@@ -1784,7 +2111,9 @@ class TestTurnCompleteLabelling:
 
         service._persist_judge_state = _reject  # type: ignore[method-assign]
         service._append_judge_labels = (  # type: ignore[method-assign]
-            lambda _loop, changed, *, tool_calls=None, reply_chars=0: published.extend(changed)
+            lambda _loop, changed, *, tool_calls=None, reply_chars=0, **_rest: published.extend(
+                changed
+            )
         )
         try:
             self._complete(service, tool_calls=4, reply_text="", nudge_turn=True)
@@ -1804,7 +2133,9 @@ class TestTurnCompleteLabelling:
 
         service._persist_judge_state = _detach_loop  # type: ignore[method-assign]
         service._append_judge_labels = (  # type: ignore[method-assign]
-            lambda _loop, changed, *, tool_calls=None, reply_chars=0: published.extend(changed)
+            lambda _loop, changed, *, tool_calls=None, reply_chars=0, **_rest: published.extend(
+                changed
+            )
         )
         try:
             self._complete(service, tool_calls=1, reply_text="", nudge_turn=True)
@@ -1822,7 +2153,9 @@ class TestTurnCompleteLabelling:
 
         service._persist_judge_state = _replace_history  # type: ignore[method-assign]
         service._append_judge_labels = (  # type: ignore[method-assign]
-            lambda _loop, changed, *, tool_calls=None, reply_chars=0: published.extend(changed)
+            lambda _loop, changed, *, tool_calls=None, reply_chars=0, **_rest: published.extend(
+                changed
+            )
         )
         try:
             self._complete(service, tool_calls=1, reply_text="", nudge_turn=True)
@@ -1860,7 +2193,7 @@ class TestTurnCompleteLabelling:
         async def _succeed(_loop) -> bool:
             return True
 
-        def _clear_then_raise(_loop, _changed, *, tool_calls=None, reply_chars=0):
+        def _clear_then_raise(_loop, _changed, *, tool_calls=None, reply_chars=0, **_rest):
             loop.judge_recent_verdicts = []
             raise RuntimeError("publication failed")
 

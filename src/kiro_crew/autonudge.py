@@ -5315,6 +5315,7 @@ class AutoNudgeService:
         reply_text: str | None = None,
         reply_flushed: bool = False,
         nudge_turn: bool | None = None,
+        tool_identities: object = None,
     ) -> None:
         """Called by gateway after HOOK_EVENT_STOP — resume the countdown for this slot.
 
@@ -5330,14 +5331,18 @@ class AutoNudgeService:
         loop run extra cycles after a restart. The deferred re-arm is applied
         when the window closes.
 
-        *tool_calls* and *reply_text* are what the completed turn DID, and this is the
-        only hook where the service can see it: the runner holds both as locals of the
-        turn it is finishing. *nudge_turn* binds those facts to this loop's own delivered
-        turn. *reply_flushed* says the visible text is only the final segment of the
-        reply. An unknown *nudge_turn* reads as not this loop's turn: declining to
-        label costs one row of hit rate, while labelling an unrelated turn writes a
-        wrong row. None of the four is stored: the rule reduces them to one boolean
-        and that boolean is what the loop's record and the calibration log keep.
+        *tool_calls*, *tool_identities* and *reply_text* are what the completed turn
+        DID, and this is the only hook where the service can see it: the runner holds
+        all three as locals of the turn it is finishing. *tool_identities* is what makes
+        the label DISCRIMINATE -- it names each dispatch, so a turn whose only call read
+        a file is not counted as having acted, which a bare *tool_calls* count cannot
+        express. It is optional, and its absence falls back to the count.
+        *nudge_turn* binds those facts to this loop's own delivered turn.
+        *reply_flushed* says the visible text is only the final segment of the reply. An
+        unknown *nudge_turn* reads as not this loop's turn: declining to label costs one
+        row of hit rate, while labelling an unrelated turn writes a wrong row. None of
+        the five is stored: the rule reduces them to one boolean plus two numbers and a
+        flag, and that is what the loop's record and the calibration log keep.
         """
         loop = self._find_by_slot(slot_key)
         if not loop or not loop.active:
@@ -5351,10 +5356,11 @@ class AutoNudgeService:
                 from kiro_crew import autonudge_judge as judge
 
                 asyncio.get_running_loop()
-                acted, tool_call_count, reply_chars = judge.owner_action_reading(
+                acted, tool_call_count, reply_chars, names_known = judge.owner_action_reading(
                     tool_calls,
                     reply_text,
                     reply_flushed=reply_flushed,
+                    tool_identities=tool_identities,
                 )
                 task = asyncio.ensure_future(
                     self._label_judge_delivery_locked(
@@ -5362,6 +5368,7 @@ class AutoNudgeService:
                         acted,
                         tool_calls=tool_call_count,
                         reply_chars=reply_chars,
+                        tool_names_known=names_known,
                     )
                 )
             except RuntimeError:
@@ -6156,6 +6163,7 @@ class AutoNudgeService:
         *,
         tool_calls: int | None,
         reply_chars: int,
+        tool_names_known: bool = False,
     ) -> None:
         """Label this loop's newest unlabelled delivery, and the quiets behind it.
 
@@ -6164,6 +6172,10 @@ class AutoNudgeService:
         the history and writes one calibration row per label it changed. The loop record
         is written durably before any calibration row is published, so the log cannot
         claim a label the loop state does not carry.
+
+        *tool_names_known* rides to the log row rather than changing anything here: it
+        says whether *acted* was decided from NAMED dispatches or from a bare count, and
+        a threshold read excludes the count-only rows instead of pooling two rules.
 
         Every failure is swallowed. This runs on the gateway's turn-completion hook,
         which re-arms the loop's timer immediately afterwards, and a calibration
@@ -6215,6 +6227,7 @@ class AutoNudgeService:
                 changed,
                 tool_calls=tool_calls,
                 reply_chars=reply_chars,
+                tool_names_known=tool_names_known,
             )
         except Exception:
             _restore_unless_replaced()
@@ -6231,6 +6244,7 @@ class AutoNudgeService:
         *,
         tool_calls: int | None,
         reply_chars: int,
+        tool_names_known: bool = False,
     ) -> None:
         """Write one calibration row per label just earned. Never raises.
 
@@ -6263,6 +6277,7 @@ class AutoNudgeService:
                     value=value,
                     tool_calls=tool_calls,
                     reply_chars=reply_chars,
+                    tool_names_known=tool_names_known,
                     position_back=row.get("position_back"),
                     age_s=row.get("age_s"),
                 )

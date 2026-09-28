@@ -145,7 +145,10 @@ Mapping, in code, not in the model:
 - `finished` or `broken` with `confidence ≥ 0.6` → **WAKE** with the verdict
   attached, so the woken session can report and decide to stop; the judge itself
   never ends the loop.
-- `P(wake) ≥ 0.5` or `outcome ∈ {needs_action, needs_human}` → **WAKE**.
+- `P(wake) ≥ 0.5` → **WAKE**; or `outcome ∈ {needs_action, needs_human}` → **WAKE**,
+  except when `needs_owner` answered `quiet` at `P ≥ 0.5` and that outcome's
+  confidence is `< 0.6` (`ACTION_OVERRIDE_MIN_P`), since only `needs_owner` carries
+  the owner's own `wake_when` / `quiet_when`.
 - otherwise → **QUIET**: re-arm, no turn.
 - Low confidence (`< 0.4` on `outcome`) → WAKE. A judge that is unsure hands
   the call to System Two; it never guesses quiet.

@@ -152,13 +152,21 @@ OUTCOME_OPTIONS = (
 #: closed, a work ledger with every item closed -- may end a loop.
 TERMINAL_OUTCOMES = frozenset({OUTCOME_FINISHED, OUTCOME_BROKEN})
 
-#: The two outcomes that need the owning session whatever ``needs_owner`` said.
+#: The two outcomes that need the owning session even when ``needs_owner`` answered
+#: ``quiet`` -- but only from :data:`ACTION_OVERRIDE_MIN_P` upward. Below that bar the
+#: owner's own answer stands, because this question carries no owner criterion and
+#: that one does.
 ACTION_OUTCOMES = frozenset({OUTCOME_NEEDS_ACTION, OUTCOME_NEEDS_HUMAN})
 
-#: The ONLY two outcomes that may cost the loop its turn. An allowlist rather
-#: than "everything not matched above", because that catch-all had a hole in the
-#: one direction this design cannot afford: a ``finished`` or ``broken`` answer
-#: that misses :data:`TERMINAL_MIN_P` is not confident enough to END the watch,
+#: The two outcomes that may cost the loop its turn on their own, plus -- since the
+#: ``needs_owner`` override was narrowed -- an :data:`ACTION_OUTCOMES` answer under
+#: :data:`ACTION_OVERRIDE_MIN_P` whose ``needs_owner`` answered ``quiet``. That second
+#: route is the owner's criterion being honoured, not a third quiet outcome: it needs
+#: BOTH halves, and an action outcome with no quiet answer behind it still wakes.
+#:
+#: An allowlist rather than "everything not matched above", because that catch-all had
+#: a hole in the one direction this design cannot afford: a ``finished`` or ``broken``
+#: answer that misses :data:`TERMINAL_MIN_P` is not confident enough to END the watch,
 #: and under a catch-all it fell through every rule above into QUIET -- so a judge
 #: saying "I think this is finished, but only half sure" produced silence about
 #: the one event the owner most needs to hear. Naming the quiet outcomes makes
@@ -190,6 +198,24 @@ NEEDS_OWNER_MIN_P = 0.5
 #: silence and the call goes to the main session. The floor under every quiet
 #: verdict, and the reason an uncalibrated judge costs turns rather than signals.
 OUTCOME_MIN_P = 0.4
+
+#: How sure ``outcome`` must be before an :data:`ACTION_OUTCOMES` answer may override a
+#: ``needs_owner`` that answered ``quiet``. Above :data:`OUTCOME_MIN_P` on purpose,
+#: because the two questions are not equally informed: ``needs_owner`` carries the
+#: owner's literal ``wake_when`` / ``quiet_when`` in its prompt and ``outcome`` carries
+#: no owner criterion at all. At the shared floor alone, a ``needs_action`` answer
+#: barely over 0.4 vetoed a ``quiet`` answered at 0.94 against the owner's own
+#: sentence -- measured on 118 logged verdicts, 11 wakes came only from that clause and
+#: 8 of those had ``outcome`` under 0.52. A red pull request under repair answers
+#: ``needs_action`` every tick, so the veto fired for the whole repair.
+#:
+#: This bar narrows the backstop; it does not remove it. An action outcome at or above
+#: it still overrides, an action outcome whose ``needs_owner`` did NOT answer ``quiet``
+#: still wakes unconditionally, and :data:`OUTCOME_MIN_P` still wakes underneath
+#: everything -- so the only reading this turns into silence is one where the judge is
+#: moderately sure the work needs action AND confidently sure, against the owner's own
+#: words, that the owner does not need to see it.
+ACTION_OVERRIDE_MIN_P = 0.6
 
 # --------------------------------------------------------------------------- #
 # Evidence vocabulary.
@@ -576,11 +602,27 @@ def map_answers(answers: Answers | None) -> irq.Verdict:
        would, which is every failure path's destination.
     2. ``outcome`` below :data:`OUTCOME_MIN_P` -> ``WAKE``. An unsure judge hands
        the call to the main session rather than guessing quiet.
-    3. ``needs_owner`` answering ``wake`` at or above :data:`NEEDS_OWNER_MIN_P`, or
-       an outcome in :data:`ACTION_OUTCOMES` -> ``WAKE``.
-    4. an outcome in :data:`QUIET_OUTCOMES` -> ``QUIET``.
-    5. anything left is :data:`TERMINAL_OUTCOMES` -> ``WAKE``, with the verdict in
+    3. ``needs_owner`` answering ``wake`` at or above :data:`NEEDS_OWNER_MIN_P`
+       -> ``WAKE``.
+    4. an outcome in :data:`ACTION_OUTCOMES` -> ``WAKE``, UNLESS ``needs_owner``
+       answered ``quiet`` at or above :data:`NEEDS_OWNER_MIN_P` and ``outcome`` is
+       below :data:`ACTION_OVERRIDE_MIN_P`.
+       That exception is the whole reason the two rules are separate: ``needs_owner``
+       is the only question carrying the owner's own ``wake_when`` / ``quiet_when``,
+       so a barely-confident answer to a question carrying NO owner criterion must
+       not veto a confident one that does. Both halves of "confident" are enforced --
+       the quiet answer clears its own bar and the action answer misses the override
+       bar -- so neither an unsure quiet nor a sure action outcome buys silence. When
+       the wake is withheld the verdict is QUIET and its body names both answers,
+       because the reader of a suppressed tick needs to see which two readings
+       disagreed.
+    5. an outcome in :data:`QUIET_OUTCOMES` -> ``QUIET``.
+    6. anything left is :data:`TERMINAL_OUTCOMES` -> ``WAKE``, with the verdict in
        the body so the woken session can report and decide for itself.
+
+    Only rule 4's exception reads ``needs_owner``'s VALUE as quiet. A ``wake`` answer
+    that missed :data:`NEEDS_OWNER_MIN_P` is not a quiet answer -- nobody asserted the
+    owner can be left alone -- so it keeps the unconditional backstop.
 
     **The judge never returns ``TERMINAL``.** Ending a watch is the one verdict the
     owner cannot recover by waiting, and this judge reads PROSE -- a single hostile
@@ -615,6 +657,29 @@ def map_answers(answers: Answers | None) -> irq.Verdict:
             body=f"wake judge: the owner needs to act (p={needs_owner.p:.2f}, outcome {value})",
         )
     if value in ACTION_OUTCOMES:
+        # The narrowed backstop. A quiet answered against the owner's own criterion
+        # stands unless THIS question is confident too, because it carries no owner
+        # criterion of its own and the other one does.
+        #
+        # ``needs_owner`` must clear its OWN bar to withhold the wake, which is the
+        # same :data:`NEEDS_OWNER_MIN_P` rule 3 applies to a wake answer. Without it an
+        # unconfident quiet -- reachable from any provider that does not return the
+        # argmax, which is exactly why that threshold is enforced literally rather than
+        # assumed -- would suppress a ``needs_human`` tick on the strength of an answer
+        # nobody was sure of, and the owner would hear nothing until the streak floor.
+        if (
+            needs_owner.value == NEEDS_OWNER_QUIET
+            and needs_owner.p >= NEEDS_OWNER_MIN_P
+            and outcome.p < ACTION_OVERRIDE_MIN_P
+        ):
+            return irq.Verdict(
+                irq.Outcome.QUIET,
+                body=(
+                    f"wake judge: quiet by owner criteria (p={needs_owner.p:.2f}); "
+                    f"outcome {value} p={outcome.p:.2f} below override bar "
+                    f"{ACTION_OVERRIDE_MIN_P:.2f}"
+                ),
+            )
         return irq.Verdict(
             irq.Outcome.WAKE,
             body=f"wake judge: the watched work is {value} (p={outcome.p:.2f})",
