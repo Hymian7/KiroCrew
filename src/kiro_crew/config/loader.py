@@ -1368,8 +1368,10 @@ def read_config_for_update(path: Path | None = None) -> dict:
     must let that abort the update — leaving the existing file untouched is
     always better than overwriting it with defaults.
 
-    Pair this with :func:`kiro_crew.atomic_write.atomic_write` on the way out so
-    the write cannot create the torn window for the next reader.
+    Pair this with :func:`write_config_atomically` on the way out. On POSIX that
+    write is in place (the sandbox's read-only bind holds the inode), so a torn
+    window does exist for a reader outside the lock; this function's fail-closed
+    read is what keeps such a reader from writing the emptiness back.
     """
     p = path if path is not None else config_path()
     try:
@@ -1455,20 +1457,59 @@ def _deepseek_env_on_disk(path: Path) -> object:
     return agent.get("deepseek_env") if isinstance(agent, dict) else None
 
 
+def _write_config_in_place(path: Path, payload: str, *, fsync: bool, mode: int) -> None:
+    """Write *payload* over *path* through the inode already at that name.
+
+    The POSIX publish for :func:`write_config_atomically`. Deliberately NOT a
+    temp+rename: the OS sandbox seals ``config.json`` / ``config.local.json``
+    with a read-only bind mount (``sandbox._CREW_READONLY_LEAVES``), and a Linux
+    file bind is pinned to the INODE it was made over. A rename installs a new
+    inode at the name, so every sandbox already running would see that new file
+    unsealed and writable -- the seal would last exactly until the owner's next
+    save. Writing in place keeps the inode, so the bind holds and a sandboxed
+    reader sees the live content, read-only.
+
+    The whole payload is written first and the file then truncated to its
+    length, so a reader racing the write sees a torn document only inside that
+    window; the loader treats a torn read as unreadable and writes nothing back
+    (see :func:`read_config_for_update`). An existing file keeps its mode by
+    construction; an absent one is created owner-only (*mode*). A symlink was
+    already resolved by the caller, so the open follows nothing further.
+    """
+    encoded = payload.encode("utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, mode)
+    try:
+        written = 0
+        while written < len(encoded):
+            written += os.write(fd, encoded[written:])
+        os.ftruncate(fd, len(encoded))
+        if fsync:
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> None:
-    """Write a config dict to *path* atomically, PRESERVING its permissions.
+    """Write a config dict to *path* in one publish, PRESERVING its permissions.
 
     The companion to :func:`read_config_for_update`. Two properties matter:
 
-    * **Atomic** (tmp+rename) so a concurrent reader can never observe a
-      half-written file. A truncate-then-write leaves a window in which a reader
-      sees invalid JSON; a reader that mistakes that for "no settings" will write
-      the emptiness back and destroy the user's config.
-    * **Mode-preserving.** Because tmp+rename creates a NEW inode, the umask
-      default (typically ``0644``) would silently replace an operator's tightened
-      ``0600``. ``config.json`` can hold inline credentials, so a settings write
-      must never widen who can read it. An existing file's mode is carried over;
-      a newly created one defaults to owner-only.
+    * **One publish per save, through a stable inode.** On POSIX the document is
+      written IN PLACE (:func:`_write_config_in_place`), never temp+rename: the
+      OS sandbox's read-only seal on ``config.json`` / ``config.local.json`` is a
+      bind mount pinned to the inode, and a rename would put a new, unsealed
+      inode at the name for every sandbox already running. The price is a small
+      torn-read window, which the loader absorbs: a torn read is treated as
+      unreadable, nothing is written back, and every read-modify-write goes
+      through :func:`read_config_for_update`, which fails CLOSED rather than
+      mistaking it for "no settings". Windows has no bind mounts and keeps the
+      temp+rename below.
+    * **Mode-preserving.** An in-place write keeps the mode by construction. On
+      the Windows temp+rename path a NEW inode would otherwise take the umask
+      default (typically ``0644``) over an operator's tightened ``0600``;
+      ``config.json`` can hold inline credentials, so a settings write must
+      never widen who can read it. An existing file's mode is carried over; a
+      newly created one defaults to owner-only on either platform.
 
     ``atomic_write``'s ``mode`` routes through ``fchmod_safe``, which applies the
     mode on POSIX and is a documented no-op on Windows.
@@ -1498,11 +1539,11 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     DACL on **any** volume. Only a write still inline on the loop falls back to
     classifying the volume and skipping when it is remote.
 
-    **Symlinks are followed, not replaced.** ``os.replace`` renames over the link
-    itself, turning a symlinked ``config.json`` into a regular file and orphaning
-    its target — whereas the ``write_text`` this replaced followed the link and
-    updated the target. Symlinking the config into a dotfiles repo is a normal
-    setup, so the target is resolved first to preserve that behavior.
+    **Symlinks are followed, not replaced.** On the Windows rename path
+    ``os.replace`` would rename over the link itself, turning a symlinked
+    ``config.json`` into a regular file and orphaning its target. Symlinking the
+    config into a dotfiles repo is a normal setup, so the target is resolved
+    first on both platforms, and the mode preserved is the target's.
     """
     _refuse_unpublishable(data, path)
     # Resolve BEFORE stat/write so a symlinked config keeps pointing at its
@@ -1563,7 +1604,10 @@ def write_config_atomically(path: Path, data: dict, *, fsync: bool = False) -> N
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2) + "\n"
     if platform_compat.IS_POSIX:
-        atomic_write(path, payload, fsync=fsync, mode=mode)
+        # In place, not temp+rename: the sandbox's read-only bind holds the
+        # INODE, and a rename would hand every running sandbox a fresh, unsealed
+        # one. See _write_config_in_place.
+        _write_config_in_place(path, payload, fsync=fsync, mode=mode)
     elif lock_down:
         # Windows: the mode bits above are inert (fchmod_safe is a documented
         # no-op), so there is nothing to preserve and no conflict with
@@ -1714,11 +1758,12 @@ def update_config_locked(
       read-modify-write, so two concurrent callers are serialized: neither can
       land between the other's read and write.
     * **Sidecar lockfile.** The lock lives on ``<path>.lock``, NOT on the
-      config file's own fd.  ``write_config_atomically`` replaces the inode
-      (tmp + rename), so a lock taken on the config file's fd would not
+      config file's own fd.  ``write_config_atomically`` replaces the inode on
+      Windows (tmp + rename), so a lock taken on the config file's fd would not
       serialize against the rename — a second opener after the rename gets a
       NEW fd on the NEW inode and takes the lock instantly, defeating the
-      purpose.
+      purpose. POSIX writes in place, but the sidecar stays the one lock path
+      on both platforms.
     * **Fail-closed read (default).** :func:`read_config_for_update` is used
       inside the critical section; with ``on_corrupt="fail"`` (the default), an
       unreadable or malformed config raises :class:`ConfigReadError`, aborts
@@ -2618,10 +2663,13 @@ def _config_fingerprint() -> tuple:
     """Cheap signature of the config files — changes whenever either is edited.
 
     Includes replacement identity (device + inode) and change time in addition
-    to mtime, size, and mode. Dashboard/CLI writers publish with atomic rename;
-    on a coarse-timestamp filesystem an Incognito→Temporary replacement can
-    otherwise keep the same mtime and size, making another process's cache look
-    current. A missing file contributes a sentinel so create/delete also busts.
+    to mtime, size, and mode. An Incognito→Temporary write keeps the same size,
+    and on a coarse-timestamp filesystem the same mtime, so those alone would
+    make another process's cache look current. Device + inode catch a rename
+    publish (the Windows path, and any out-of-band editor); ctime catches the
+    in-place publish ``write_config_atomically`` uses on POSIX, where the inode
+    is deliberately kept so the sandbox's read-only bind on it survives the
+    save. A missing file contributes a sentinel so create/delete also busts.
     """
     sig: list = []
     for p in (config_path(), config_local_path()):
@@ -5363,13 +5411,14 @@ class KiroCrewConfig:
             except (json.JSONDecodeError, OSError):
                 pass
 
-        # Atomic + mode-preserving: a concurrent reader must never observe a
-        # half-written config, and the write must not widen who can read a file
-        # that may hold inline credentials. See write_config_atomically.
+        # One publish, mode-preserving, through the existing inode on POSIX so
+        # the sandbox's read-only bind survives it; the write must not widen who
+        # can read a file that may hold inline credentials. See
+        # write_config_atomically.
         #
         # Resolve a symlinked config BEFORE locking (same logic as
         # update_config_locked) so the sidecar sits beside the ACTUAL file the
-        # rename will replace — a lock beside the symlink would not serialize
+        # write will land on — a lock beside the symlink would not serialize
         # against a writer that resolved first.
         p = config_path()
         try:
