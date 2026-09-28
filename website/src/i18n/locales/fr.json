@@ -15665,7 +15665,8 @@
         "reconnect_enterprise_validation_failed": "Cet espace de travail Slack ne figure pas dans les organisations d'entreprise autorisées. Mets la liste à jour ci-dessous et enregistre, puis clique sur « Reconnecter ».",
         "reconnect_denied_by_policy": "Une politique de canaux sur cette machine n'autorise pas Slack à se connecter.",
         "reconnect_failed_reason": "La reconnexion a échoué : {{reason}}",
-        "saved_reconnect_and_restart": "Enregistré. Clique sur «Reconnecter» pour appliquer les jetons ; la commande slash nécessite toujours un redémarrage de la passerelle."
+        "saved_reconnect_and_restart": "Enregistré. Clique sur «Reconnecter» pour appliquer les jetons ; la commande slash nécessite toujours un redémarrage de la passerelle.",
+        "reconnect_previous_client_close_failed": "La connexion Slack précédente n'a pas pu être fermée, donc rien n'a été modifié. Clique de nouveau sur «Reconnecter» ; si l'échec persiste, redémarre la passerelle."
       },
       "sttSettings": {
         "language_auto": "Détecter automatiquement la langue",

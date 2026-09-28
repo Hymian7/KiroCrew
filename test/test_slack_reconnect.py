@@ -15,6 +15,11 @@ pin the in-place alternative:
   published again only behind a connected one, and the dashboard's
   ``owner_id`` follows the saved owner -- so a rejected workspace or a former
   owner never keeps dashboard access through a reconnect;
+* the handler module's authorization subject (owner + allowlist) follows the
+  saved owner on EVERY reconnect, including the ones that stop before a
+  handshake, and an old socket client that will not close aborts the attempt
+  with that subject cleared -- so a listener that outlives its credentials
+  accepts no privileged command from the former owner;
 * concurrent callers share one handshake;
 * the route carries the PUT's direct-local gate and answers the
   ``connected`` / ``connect_error`` shape ``GET /api/slack/config`` documents.
@@ -27,6 +32,7 @@ because a real handshake needs Slack.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -43,6 +49,7 @@ NEW_CREDS = {
     CRED_SLACK_BOT_TOKEN: "xoxb-new-not-a-real-value",
     CRED_OWNER_ID: "U0NEWOWNER",
 }
+FORMER_OWNER = "U0FORMEROWNER"
 
 
 def _orch(creds: dict[str, str] | Exception = NEW_CREDS, *, old_client: Any = None) -> Any:
@@ -245,17 +252,111 @@ async def test_connect_failure_reason_is_surfaced() -> None:
     assert orch.dashboard_state.slack_connect_error == "invalid_auth"
 
 
+def _bind_former_owner() -> None:
+    """Put the handler module in the state a booted gateway leaves it in."""
+    from kiro_crew.slack import handler
+
+    handler.set_allowed_users({FORMER_OWNER})
+    handler.set_owner_id(FORMER_OWNER)
+    assert handler.is_allowed_user(FORMER_OWNER)
+
+
+def _unbind_handler() -> None:
+    from kiro_crew.slack import handler
+
+    handler.set_allowed_users(set())
+    handler.set_owner_id("")
+
+
 @pytest.mark.asyncio
-async def test_old_client_close_failure_does_not_block_the_new_handshake() -> None:
+async def test_old_client_close_failure_aborts_and_revokes_the_former_owner() -> None:
+    """GPT F1: a close that fails leaves a listener up; the reconnect must not
+    then hoist new credentials around it (tokens now missing -> no handshake ->
+    the old listener keeps the former owner). Abort, keep the client referenced,
+    clear the authorization subject, name the outcome."""
+    from kiro_crew.slack import handler
+
     old = MagicMock(name="old-socket-client")
-    old.close = AsyncMock(side_effect=RuntimeError("websocket already gone"))
+    old.close = AsyncMock(side_effect=RuntimeError("websocket would not close"))
+    orch = _orch({CRED_OWNER_ID: "U0NEWOWNER"}, old_client=old)  # tokens cleared on disk
+    rec = _Recorder()
+    _bind_former_owner()
+    try:
+        result = await _run(orch, rec)
+
+        assert result == {"connected": False, "connect_error": "previous_client_close_failed"}
+        assert orch._socket_client is old  # still referenced: retry / shutdown close it again
+        assert rec.calls == []  # no handshake attempted around a live listener
+        # Nothing from the store was hoisted.
+        assert orch._app_token == "xapp-stale"
+        assert orch._owner_id == ""
+        assert orch._slack_enabled is False
+        # The surviving listener authorizes nobody.
+        assert handler.is_allowed_user(FORMER_OWNER) is False
+        assert handler.is_owner(FORMER_OWNER) is False
+        # The badge reads the failure; the mirror stays empty.
+        assert orch.dashboard_state.slack_socket_connected is False
+        assert orch.dashboard_state.slack_connect_error == "previous_client_close_failed"
+        assert orch.dashboard_state.slack_client is None
+    finally:
+        _unbind_handler()
+
+
+@pytest.mark.asyncio
+async def test_close_timeout_is_a_failed_close() -> None:
+    """The bounded close's timeout is a failed close too (it is an Exception)."""
+    old = MagicMock(name="old-socket-client")  # close() is a plain MagicMock: wait_for is patched
     orch = _orch(old_client=old)
     rec = _Recorder()
 
-    result = await _run(orch, rec)
+    with patch("kiro_crew.slack.gateway.asyncio.wait_for", side_effect=asyncio.TimeoutError):
+        result = await _run(orch, rec)
 
-    assert orch._socket_client is rec.client
-    assert result["connected"] is True
+    assert result["connect_error"] == "previous_client_close_failed"
+    assert orch._socket_client is old
+    assert rec.calls == []
+
+
+@pytest.mark.asyncio
+async def test_tokens_missing_rebinds_the_handler_subject_to_the_saved_owner() -> None:
+    """The path that never reaches init_socket_mode must still move the
+    handler module off the former owner (init_socket_mode is the only other
+    writer of those globals)."""
+    from kiro_crew.slack import handler
+
+    old = MagicMock(name="old-socket-client")
+    old.close = AsyncMock()
+    orch = _orch({CRED_OWNER_ID: "U0NEWOWNER"}, old_client=old)
+    rec = _Recorder()
+    _bind_former_owner()
+    try:
+        result = await _run(orch, rec)
+
+        assert result["connect_error"] == "tokens_missing"
+        assert rec.calls == []
+        assert handler.is_allowed_user(FORMER_OWNER) is False
+        assert handler.is_owner("U0NEWOWNER") is True
+    finally:
+        _unbind_handler()
+
+
+@pytest.mark.asyncio
+async def test_cleared_owner_leaves_no_handler_subject() -> None:
+    from kiro_crew.slack import handler
+
+    creds = {k: v for k, v in NEW_CREDS.items() if k != CRED_OWNER_ID}
+    orch = _orch(creds)
+    rec = _Recorder()
+    _bind_former_owner()
+    try:
+        result = await _run(orch, rec)
+
+        assert result["connect_error"] == "owner_id_missing"
+        assert handler.is_allowed_user(FORMER_OWNER) is False
+        assert handler._owner_id == ""
+        assert handler._allowed_users == set()
+    finally:
+        _unbind_handler()
 
 
 @pytest.mark.asyncio
@@ -465,6 +566,7 @@ async def test_route_denies_remote_sessions_like_the_put() -> None:
         resp = await mod.api_slack_reconnect(_request(state))
 
     assert resp.status == 403
+    assert json.loads(resp.body)["code"] == "remote_read_only"
     state._slack_reconnect.assert_not_awaited()
 
 
@@ -481,6 +583,7 @@ async def test_route_is_503_when_no_gateway_owns_a_socket() -> None:
         resp = await mod.api_slack_reconnect(_request(state))
 
     assert resp.status == 503
+    assert json.loads(resp.body)["code"] == "slack_reconnect_unavailable"
 
 
 @pytest.mark.asyncio
@@ -497,7 +600,75 @@ async def test_route_is_500_when_the_store_cannot_be_read() -> None:
         resp = await mod.api_slack_reconnect(_request(state))
 
     assert resp.status == 500
+    assert json.loads(resp.body)["code"] == "credential_store_unreadable"
     assert sel.log_api_access.call_args.kwargs["outcome"] == "denied"
+
+
+@pytest.mark.asyncio
+async def test_route_waits_for_the_config_lock_the_save_holds() -> None:
+    """Reconnect must not read credentials while a save is writing them.
+
+    Outside ``_get_config_lock()`` a Reconnect that lands mid-save snapshots
+    the credentials the operator is replacing and hoists them AFTER the save
+    commits: the former owner stays authorized on the live socket. Holding the
+    lock the PUT holds makes the read see only a completed save.
+    """
+    import kiro_crew.dashboard.handlers.messaging as mod
+    from kiro_crew.dashboard.handlers.agents import _get_config_lock
+
+    state = MagicMock()
+    state._slack_reconnect = AsyncMock(return_value={"connected": True, "connect_error": ""})
+    with (
+        patch.object(mod, "is_direct_local_request", lambda req: True),
+        patch.object(mod, "_sel", lambda: MagicMock()),
+    ):
+        async with _get_config_lock():  # a save in flight
+            handler = asyncio.create_task(mod.api_slack_reconnect(_request(state)))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            state._slack_reconnect.assert_not_awaited()  # blocked behind the save
+        resp = await asyncio.wait_for(handler, 5)
+
+    assert resp.status == 200
+    state._slack_reconnect.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_route_keeps_the_lock_until_the_attempt_ends() -> None:
+    """A client that gives up mid-handshake must not release the lock early.
+
+    The orchestrator shields the shared attempt from the caller's cancel, so
+    the attempt keeps running; if the handler dropped the lock on cancel, a
+    save could commit under that still-running read -- the same window.
+    """
+    import kiro_crew.dashboard.handlers.messaging as mod
+    from kiro_crew.dashboard.handlers.agents import _get_config_lock
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_reconnect() -> dict[str, object]:
+        started.set()
+        await release.wait()
+        return {"connected": True, "connect_error": ""}
+
+    state = MagicMock()
+    state._slack_reconnect = slow_reconnect
+    with (
+        patch.object(mod, "is_direct_local_request", lambda req: True),
+        patch.object(mod, "_sel", lambda: MagicMock()),
+    ):
+        handler = asyncio.create_task(mod.api_slack_reconnect(_request(state)))
+        await asyncio.wait_for(started.wait(), 5)
+        handler.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert _get_config_lock().locked()  # still held while the attempt runs
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(handler, 5)
+
+    assert not _get_config_lock().locked()
 
 
 def test_route_is_registered_as_post_beside_the_put() -> None:
@@ -513,3 +684,144 @@ def test_route_is_registered_as_post_beside_the_put() -> None:
     ]
     assert [r.method for r in reconnect] == ["POST"]
     assert reconnect[0].handler is handlers.api_slack_reconnect
+
+
+# ── Queued turns keep the client that received them across a reconnect ──
+
+
+def _queue_orch(live_client: Any) -> MagicMock:
+    """Orchestrator double for ``_dispatch_queued`` / ``_route_message``.
+
+    ``orch.slack`` is whatever a reconnect made it; the test decides what the
+    queue entry remembers. Mirrors test_message_queue's harness: transport off
+    so the native ``handle_message`` patch is the one that runs.
+    """
+    from kiro_crew.config.loader import ACTIVATION_ALWAYS, KiroCrewConfig, MessagingConfig
+
+    orch = MagicMock()
+    orch._cfg = KiroCrewConfig(
+        slack_channels={},
+        slack_dm_activation=ACTIVATION_ALWAYS,
+        messaging=MessagingConfig(use_transport=False),
+    )
+    orch.channel_history = MagicMock()
+    orch.slack = live_client
+    orch.sessions = MagicMock()
+    orch.sessions.is_busy.return_value = False
+    orch.sessions.enqueue = MagicMock(return_value=False)
+    orch.sessions.dequeue = MagicMock(return_value=None)
+    orch.sessions.cancel_queued = MagicMock(return_value=False)
+    orch.sessions.is_cancelled = MagicMock(return_value=False)
+    orch.sessions.clear_queue = MagicMock()
+    orch.sessions.has_session = MagicMock(return_value=False)
+    orch.ctx_builder = None
+    orch.cron_svc = None
+    orch.conv_log = None
+    orch.consolidator = None
+    orch.subagent_mgr = None
+    orch.task_runner = None
+    orch._handler_tasks = set()
+    orch._session_tasks = {}
+    orch._pending_queue = {}
+    return orch
+
+
+@pytest.mark.asyncio
+async def test_queued_turn_answers_through_the_client_that_received_it() -> None:
+    """A reconnect to workspace B between enqueue and drain must not carry a
+    workspace-A turn onto B's client: the reaction removal and the turn itself
+    both use the client the queue entry bound at enqueue."""
+    from kiro_crew.slack import events
+
+    workspace_a = AsyncMock(name="workspace_a")
+    workspace_b = AsyncMock(name="workspace_b")
+    orch = _queue_orch(workspace_b)  # the reconnect already happened
+    kwargs = {"channel": "C_A", "thread_ts": "1.0", "slack_client": workspace_a}
+
+    with patch.object(events, "handle_message", new_callable=AsyncMock) as hm:
+        await events._dispatch_queued(orch, "1.0", "2.0", "follow up", kwargs)
+
+    workspace_a.remove_reaction.assert_awaited_once_with("C_A", "2.0", "hourglass_flowing_sand")
+    workspace_b.remove_reaction.assert_not_awaited()
+    assert hm.await_args.args[0] is workspace_a
+
+
+@pytest.mark.asyncio
+async def test_queue_entry_without_a_bound_client_uses_the_live_one() -> None:
+    """Entries queued before the key existed keep working."""
+    from kiro_crew.slack import events
+
+    live = AsyncMock(name="live")
+    orch = _queue_orch(live)
+
+    with patch.object(events, "handle_message", new_callable=AsyncMock) as hm:
+        await events._dispatch_queued(orch, "1.0", "2.0", "follow up", {"channel": "C1"})
+
+    live.remove_reaction.assert_awaited_once()
+    assert hm.await_args.args[0] is live
+
+
+@pytest.mark.asyncio
+async def test_every_enqueue_site_binds_the_receiving_client() -> None:
+    """All three queue writers in ``_route_message`` record ``orch.slack`` as
+    it was when the message arrived: the session queue (busy task), the
+    pre-session pending queue, and the semaphore-locked session queue."""
+    from kiro_crew.slack.events import SeenCache, _route_message
+
+    received_by = AsyncMock(name="received_by")
+    patches = [
+        patch("kiro_crew.slack.events.is_allowed_user", return_value=True),
+        patch("kiro_crew.slack.enterprise.check_message_origin", return_value=True),
+        patch("kiro_crew.slack.events.handle_message", new_callable=AsyncMock),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        # 1. Busy task, session object exists -> sessions.enqueue.
+        orch = _queue_orch(received_by)
+        orch._session_tasks["ts1"] = MagicMock()
+        orch.sessions.enqueue.return_value = True
+        event = {
+            "user": "U1",
+            "text": "q",
+            "ts": "ts1",
+            "channel": "D1",
+            "channel_type": "im",
+            "team": "T1",
+        }
+        await _route_message(orch, event, SeenCache(), is_mention=True)
+        assert orch.sessions.enqueue.call_args.kwargs["slack_client"] is received_by
+
+        # 2. Busy task, no session object yet -> orch._pending_queue.
+        orch = _queue_orch(received_by)
+        orch._session_tasks["thr"] = MagicMock()
+        orch.sessions.enqueue.return_value = False
+        event = {
+            "user": "U1",
+            "text": "q",
+            "ts": "ts2",
+            "thread_ts": "thr",
+            "channel": "C1",
+            "channel_type": "channel",
+            "team": "T1",
+        }
+        await _route_message(orch, event, SeenCache(), is_mention=True)
+        _ts, _text, kw = orch._pending_queue["thr"][0]
+        assert kw["slack_client"] is received_by
+
+        # 3. No task, but the session semaphore is locked -> sessions.enqueue.
+        orch = _queue_orch(received_by)
+        orch.sessions.enqueue.return_value = True
+        event = {
+            "user": "U1",
+            "text": "q",
+            "ts": "ts3",
+            "channel": "D1",
+            "channel_type": "im",
+            "team": "T1",
+        }
+        await _route_message(orch, event, SeenCache(), is_mention=True)
+        assert orch.sessions.enqueue.call_args.kwargs["slack_client"] is received_by
+    finally:
+        for p in patches:
+            p.stop()

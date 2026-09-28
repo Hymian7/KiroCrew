@@ -1820,12 +1820,22 @@ async def _dispatch_queued(
     text: str,
     kwargs: dict,
 ) -> None:
-    """Dispatch a queued message — remove ⏳ reaction and call handle_message."""
+    """Dispatch a queued message — remove ⏳ reaction and call handle_message.
+
+    The turn answers through the client that RECEIVED it (``slack_client`` in
+    the queue entry), not through whatever ``orch.slack`` is when the queue
+    drains: ``POST /api/slack/reconnect`` can swap ``orch.slack`` for a client
+    on a different workspace between enqueue and drain, and a reply for
+    workspace A sent through workspace B's client is lost (channel unknown)
+    or, on a colliding channel id, misrouted. Entries written before this key
+    existed fall back to the live client.
+    """
     channel = kwargs.get("channel", "")
     thread_ts = kwargs.get("thread_ts")
-    if orch.slack:
+    slack = kwargs.get("slack_client") or orch.slack
+    if slack:
         try:
-            await orch.slack.remove_reaction(channel, msg_ts, "hourglass_flowing_sand")
+            await slack.remove_reaction(channel, msg_ts, "hourglass_flowing_sand")
         except Exception:
             pass
     # Route the queued follow-up through the SAME gate as the initial message so
@@ -1841,7 +1851,7 @@ async def _dispatch_queued(
     try:
         if _use_transport:
             await handle_message_transport(
-                orch.slack,  # type: ignore[arg-type]
+                slack,  # type: ignore[arg-type]
                 orch.sessions,  # type: ignore[arg-type]
                 channel,
                 text,
@@ -1874,7 +1884,7 @@ async def _dispatch_queued(
             )
             return
         await handle_message(
-            orch.slack,  # type: ignore[arg-type]
+            slack,  # type: ignore[arg-type]
             orch.sessions,  # type: ignore[arg-type]
             channel,
             text,
@@ -2763,6 +2773,10 @@ async def _route_message(
             # Historical key; carries every attachment temp path for cleanup.
             image_temp_paths=list(_attachment_temp_paths),
             from_trusted_bot=from_trusted_bot,
+            # The client that received this message answers it, even if a
+            # Reconnect swaps orch.slack before the queue drains
+            # (_dispatch_queued).
+            slack_client=orch.slack,
         )
         if not _queued:
             # Session object not created yet — stash on orch._pending_queue
@@ -2779,6 +2793,7 @@ async def _route_message(
                         user_display_name=_sender_display,
                         image_temp_paths=list(_attachment_temp_paths),
                         from_trusted_bot=from_trusted_bot,
+                        slack_client=orch.slack,
                     ),
                 )
             )
@@ -2806,6 +2821,7 @@ async def _route_message(
         user_display_name=_sender_display,
         image_temp_paths=list(_attachment_temp_paths),
         from_trusted_bot=from_trusted_bot,
+        slack_client=orch.slack,
     ):
         logger.info("Message %s queued for busy session %s", msg_ts, session_key)
         if orch.slack:

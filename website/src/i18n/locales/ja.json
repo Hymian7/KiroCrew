@@ -15219,7 +15219,8 @@
         "reconnect_enterprise_validation_failed": "この Slack ワークスペースは許可されたエンタープライズ組織に含まれていません。下でリストを更新して保存し、「再接続」をクリックしてください。",
         "reconnect_denied_by_policy": "このマシンのチャンネルポリシーにより、Slack への接続は許可されていません。",
         "reconnect_failed_reason": "再接続に失敗しました: {{reason}}",
-        "saved_reconnect_and_restart": "保存されました。「再接続」をクリックするとトークンが適用されます。スラッシュコマンドにはゲートウェイの再起動が引き続き必要です。"
+        "saved_reconnect_and_restart": "保存されました。「再接続」をクリックするとトークンが適用されます。スラッシュコマンドにはゲートウェイの再起動が引き続き必要です。",
+        "reconnect_previous_client_close_failed": "以前の Slack 接続を閉じられなかったため、何も変更されていません。「再接続」をもう一度クリックしてください。それでも失敗する場合は、ゲートウェイを再起動してください。"
       },
       "sttSettings": {
         "language_auto": "言語を自動検出",

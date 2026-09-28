@@ -346,6 +346,8 @@ from kiro_crew.slack.handler import (
     is_thread_incognito,
     is_thread_temporary,
     is_tracked_channel,
+    set_allowed_users,
+    set_owner_id,
 )
 from kiro_crew.slack.outbound import PostedOptions
 from kiro_crew.slack.retry import open_dm_with_retry
@@ -13903,13 +13905,24 @@ class GatewayOrchestrator:
            client on the same app token would compete for the same envelopes.
            The dashboard's Web API mirror is cleared with it, so nothing sends
            through the old workspace while the new one is still unverified.
+           A close that fails or times out ABORTS the attempt: the old
+           listener may still be receiving envelopes, and steps 3-5 could
+           end without a handshake (tokens or owner now missing), leaving
+           that listener up under the credentials the operator just replaced.
+           The old client stays referenced (so a retry closes it again and
+           shutdown still reaches it), the handler module's authorization
+           subject is cleared so the surviving listener accepts no privileged
+           command, and the outcome is ``previous_client_close_failed``.
         3. Reassign ``_app_token`` / ``_bot_token`` / ``_owner_id`` /
            ``_allowed_users`` and RECOMPUTE ``_slack_enabled`` from the tokens
            now on disk. ``init_socket_mode`` early-returns on a stale False and
            its own failure paths set it False, so without this step a retry
-           after any earlier failure is a silent no-op. The dashboard state's
-           ``owner_id`` -- the authorization subject of the owner-only
-           handlers -- follows the new owner in the same step.
+           after any earlier failure is a silent no-op. The authorization
+           subject follows the new owner in the same step -- the dashboard
+           state's ``owner_id`` AND the handler module's owner / allowlist,
+           which ``init_socket_mode`` otherwise refreshes only on the path
+           that reaches a handshake: a reconnect that ends at ``tokens_missing``
+           or ``owner_id_missing`` must not leave the former owner bound there.
         4. Rebuild the Web API client (``self.slack``) on the current bot
            token. It is NOT published to the dashboard yet.
         5. Await ``init_socket_mode`` and ``_connect_slack`` ON THIS LOOP,
@@ -13963,18 +13976,39 @@ class GatewayOrchestrator:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.debug(
-                    "slack reconnect: closing the previous socket client failed", exc_info=True
+                # Abort (see reconnect_slack, step 2). The client is kept
+                # referenced, not resurrected: ``close`` already switched off
+                # its auto-reconnect, and the next attempt or shutdown closes
+                # it again. Nothing from the store is hoisted, so the caller
+                # sees the connection as it stands: down, for a named reason.
+                logger.warning(
+                    "slack reconnect: closing the previous socket client failed; "
+                    "aborting so the old listener cannot outlive its credentials",
+                    exc_info=True,
                 )
+                self._socket_client = old
+                set_allowed_users(set())
+                set_owner_id("")
+                self._slack_connect_error = "previous_client_close_failed"
+                if self.dashboard_state is not None:
+                    self.dashboard_state.slack_socket_connected = False
+                    self.dashboard_state.slack_connect_error = self._slack_connect_error
+                return {"connected": False, "connect_error": self._slack_connect_error}
 
         # 3. Hoist the current credentials -- the same assignments __init__ makes,
-        # plus the dashboard's owner (init passes it to DashboardState once).
+        # plus the authorization subject: the dashboard's owner (init passes it
+        # to DashboardState once) and the handler module's owner / allowlist
+        # (init_socket_mode sets them, but only on the path that reaches a
+        # handshake -- a reconnect that stops at tokens_missing or
+        # owner_id_missing must not leave the former owner bound there).
         self._app_token = creds.get(CRED_SLACK_APP_TOKEN, "")
         self._bot_token = creds.get(CRED_SLACK_BOT_TOKEN, "")
         self._owner_id = creds.get(CRED_OWNER_ID, "")
         self._allowed_users = {self._owner_id} if self._owner_id else set()
         self._slack_enabled = bool(self._app_token and self._bot_token)
         self._slack_connect_error = ""
+        set_allowed_users(self._allowed_users)
+        set_owner_id(self._owner_id)
         if self.dashboard_state is not None:
             self.dashboard_state.owner_id = self._owner_id
 

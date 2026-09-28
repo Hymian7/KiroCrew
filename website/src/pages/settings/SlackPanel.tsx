@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useImeGuard } from '../../hooks/useImeGuard'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ExternalLink, Check, AlertTriangle, Plus, X, Lock, RefreshCw } from 'lucide-react'
+import { ExternalLink, Check, AlertTriangle, Plus, X, Lock, Plug, Loader2 } from 'lucide-react'
 import { SlackIcon } from '../../components/SlackIcon'
 import { SettingsSection, SettingsCard, SettingsInput, SettingsToggle } from '../../components/settings'
 import { SecretField } from '../../components/SecretField'
@@ -78,6 +78,8 @@ function describeConnectError(code: string): string {
       return i18nT('pages.settings.slackPanel.reconnect_enterprise_validation_failed')
     case 'denied_by_policy':
       return i18nT('pages.settings.slackPanel.reconnect_denied_by_policy')
+    case 'previous_client_close_failed':
+      return i18nT('pages.settings.slackPanel.reconnect_previous_client_close_failed')
     default:
       return i18nT('pages.settings.slackPanel.slack_connection_failed_at_startup', { error: code })
   }
@@ -357,11 +359,18 @@ export function SlackPanel() {
   // A failed click is labelled as the click's outcome: the reason is often the
   // very text that was on screen before (the same tokens, still rejected), and
   // without the prefix nothing shows that the attempt ran at all.
-  const startupError = reconnectResult
-    ? (reconnectResult.connected
-      ? ''
-      : i18nT('pages.settings.slackPanel.reconnect_failed_reason', { reason: describeConnectError(reconnectResult.connect_error) }))
-    : connectError(data)
+  // One problem at a time: while a request-level failure is on screen (the
+  // gateway never answered), the connect error the gateway recorded earlier
+  // is not the thing to fix first, and two notices stacked read as two
+  // problems. It comes back when that notice is dismissed or the next click
+  // gets an answer.
+  const startupError = reconnectError
+    ? ''
+    : reconnectResult
+      ? (reconnectResult.connected
+        ? ''
+        : i18nT('pages.settings.slackPanel.reconnect_failed_reason', { reason: describeConnectError(reconnectResult.connect_error) }))
+      : connectError(data)
   const hint = reconnectResult ? '' : connectionHint(data)
   const reconnected = !!reconnectResult?.connected
   // One button, rendered twice: beside the status pill, and beside the save
@@ -375,7 +384,10 @@ export function SlackPanel() {
       title={i18nT('pages.settings.slackPanel.reconnect_desc')}
       data-testid={testId}
     >
-      <RefreshCw size={13} className={reconnectMut.isPending ? 'animate-spin' : undefined} />
+      {/* A plug, not a circular arrow: SecretField's restore control beside
+          the token fields already uses one, and two look-alike arrows read as
+          one action. */}
+      {reconnectMut.isPending ? <Loader2 size={13} className="animate-spin" /> : <Plug size={13} />}
       {reconnectMut.isPending ? i18nT('pages.settings.slackPanel.reconnecting') : i18nT('pages.settings.slackPanel.reconnect')}
     </Btn>
   )

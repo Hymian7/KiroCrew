@@ -15219,7 +15219,8 @@
         "reconnect_enterprise_validation_failed": "此 Slack 工作区不在允许的企业组织列表中。请在下方更新列表并保存，然后点击“重新连接”。",
         "reconnect_denied_by_policy": "此机器上的频道策略不允许连接 Slack。",
         "reconnect_failed_reason": "重新连接失败：{{reason}}",
-        "saved_reconnect_and_restart": "已保存。点击“重新连接”即可应用令牌；斜杠命令仍需重启网关。"
+        "saved_reconnect_and_restart": "已保存。点击“重新连接”即可应用令牌；斜杠命令仍需重启网关。",
+        "reconnect_previous_client_close_failed": "无法关闭之前的 Slack 连接，因此未做任何更改。请再次点击“重新连接”；如果仍然失败，请重启网关。"
       },
       "sttSettings": {
         "language_auto": "自动检测语言",

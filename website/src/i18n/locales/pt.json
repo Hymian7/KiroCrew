@@ -15665,7 +15665,8 @@
         "reconnect_enterprise_validation_failed": "Este workspace do Slack não está entre as organizações corporativas permitidas. Atualize a lista abaixo e salve; depois clique em \"Reconectar\".",
         "reconnect_denied_by_policy": "Uma política de canais nesta máquina não permite que o Slack se conecte.",
         "reconnect_failed_reason": "Falha ao reconectar: {{reason}}",
-        "saved_reconnect_and_restart": "Salvo. Clique em \"Reconectar\" para aplicar os tokens; o comando de barra ainda precisa de um reinício do gateway."
+        "saved_reconnect_and_restart": "Salvo. Clique em \"Reconectar\" para aplicar os tokens; o comando de barra ainda precisa de um reinício do gateway.",
+        "reconnect_previous_client_close_failed": "A conexão anterior com o Slack não pôde ser fechada, então nada foi alterado. Clique em \"Reconectar\" de novo; se continuar falhando, reinicie o gateway."
       },
       "sttSettings": {
         "language_auto": "Detectar o idioma automaticamente",

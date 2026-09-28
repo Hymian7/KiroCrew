@@ -266,6 +266,19 @@ describe('SlackPanel reconnect', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/owner Slack member ID is missing/)
   })
 
+  it('explains an aborted reconnect as unchanged, with the retry and the fallback', async () => {
+    seed()
+    vi.spyOn(api, 'reconnectSlack').mockResolvedValue({ connected: false, connect_error: 'previous_client_close_failed' })
+    await hydrated()
+
+    fireEvent.click(reconnectBtn())
+
+    const notice = await screen.findByRole('alert')
+    expect(notice).toHaveTextContent(/^Reconnect failed: The previous Slack connection could not be closed, so nothing was changed\./)
+    expect(notice).toHaveTextContent(/Click Reconnect again; if it keeps failing, restart the gateway\./)
+    expect(screen.queryByText('Connected to Slack.')).not.toBeInTheDocument()
+  })
+
   it("shows the gateway's own refusal when it answered the request", async () => {
     seed()
     vi.spyOn(api, 'reconnectSlack').mockRejectedValue(
@@ -291,6 +304,25 @@ describe('SlackPanel reconnect', () => {
     const notice = await screen.findByRole('alert')
     expect(notice).toHaveTextContent('Reconnect failed. Is the gateway running?')
     expect(notice).not.toHaveTextContent('Failed to fetch')
+  })
+
+  it('shows one problem at a time: the recorded connect error steps aside for a transport failure', async () => {
+    // The gateway recorded invalid_auth at boot; then a click never reaches it.
+    seed({ connect_error: 'invalid_auth' })
+    vi.spyOn(api, 'reconnectSlack').mockRejectedValue(new TypeError('Failed to fetch'))
+    await hydrated()
+    expect(screen.getByRole('alert')).toHaveTextContent(/invalid_auth/)
+
+    fireEvent.click(reconnectBtn())
+
+    await screen.findByText('Reconnect failed. Is the gateway running?')
+    const alerts = screen.getAllByRole('alert')
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).not.toHaveTextContent(/invalid_auth/)
+
+    // Dismissing the transport notice brings the recorded reading back.
+    fireEvent.click(within(alerts[0]).getByRole('button', { name: /dismiss/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/invalid_auth/)
   })
 
   it('treats a 5xx the same as no answer: the proxy body is not shown', async () => {

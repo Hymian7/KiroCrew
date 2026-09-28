@@ -15442,7 +15442,8 @@
         "reconnect_enterprise_validation_failed": "Dieser Slack-Workspace gehört nicht zu den erlaubten Enterprise-Organisationen. Aktualisiere unten die Liste und speichere, dann klicke auf „Erneut verbinden“.",
         "reconnect_denied_by_policy": "Eine Kanalrichtlinie auf diesem Rechner erlaubt Slack keine Verbindung.",
         "reconnect_failed_reason": "Erneutes Verbinden fehlgeschlagen: {{reason}}",
-        "saved_reconnect_and_restart": "Gespeichert. Klicke auf „Erneut verbinden“, um die Tokens zu übernehmen; der Slash-Befehl braucht weiterhin einen Gateway-Neustart."
+        "saved_reconnect_and_restart": "Gespeichert. Klicke auf „Erneut verbinden“, um die Tokens zu übernehmen; der Slash-Befehl braucht weiterhin einen Gateway-Neustart.",
+        "reconnect_previous_client_close_failed": "Die vorherige Slack-Verbindung konnte nicht geschlossen werden, daher wurde nichts geändert. Klicke noch einmal auf „Erneut verbinden“; wenn es weiter fehlschlägt, starte das Gateway neu."
       },
       "sttSettings": {
         "language_auto": "Sprache automatisch erkennen",

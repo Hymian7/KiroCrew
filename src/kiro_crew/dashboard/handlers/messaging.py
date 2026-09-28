@@ -4833,10 +4833,24 @@ async def api_slack_reconnect(request: web.Request) -> web.Response:
     when no gateway owns a Slack socket (API-only server), 500 when the
     credential store could not be read -- in which case the live connection
     was left untouched.
+
+    Runs under the same ``_get_config_lock()`` as the PUT, and for the same
+    reason the PUT holds it across its ``.env`` write: the reconnect reads
+    the credential store the save writes, so outside the lock a Reconnect
+    that lands while a save is in flight snapshots the credentials the
+    operator is replacing and hoists them AFTER the save commits -- the
+    former owner ends up authorized on the live socket with the new one on
+    disk. Under the lock the read always sees a completed save.
+    ``run_to_completion`` keeps the lock held until the shared attempt
+    finishes even when this request is cancelled mid-handshake; releasing
+    it early would reopen the same window for the attempt still running.
     """
+    # circular import: agents imports from dashboard.handlers at module load
+    from kiro_crew.dashboard.handlers.agents import _get_config_lock  # noqa: F811
+
     caller = request.get("user", "dashboard")
 
-    def _deny(msg: str, status: int) -> web.Response:
+    def _deny(msg: str, code: str, status: int) -> web.Response:
         _sel().log_api_access(
             caller=caller,
             operation="slack.reconnect",
@@ -4844,21 +4858,30 @@ async def api_slack_reconnect(request: web.Request) -> web.Response:
             source="dashboard",
             error=msg,
         )
-        return web.json_response({"error": msg}, status=status)
+        return web.json_response({"error": msg, "code": code}, status=status)
 
     if not is_direct_local_request(request):
-        return _deny("read-only from remote sessions (local machine only)", 403)
+        return _deny(
+            "read-only from remote sessions (local machine only)",
+            "remote_read_only",
+            403,
+        )
 
     state: DashboardState = request.app["state"]
     reconnect = getattr(state, "_slack_reconnect", None)
     if reconnect is None:
-        return _deny("Slack reconnect unavailable", 503)
+        return _deny("Slack reconnect unavailable", "slack_reconnect_unavailable", 503)
 
     try:
-        result = await reconnect()
+        async with _get_config_lock():
+            result = await run_to_completion(reconnect())
     except Exception:
         logger.warning("slack reconnect: credential store could not be read", exc_info=True)
-        return _deny("could not read the saved Slack credentials", 500)
+        return _deny(
+            "could not read the saved Slack credentials",
+            "credential_store_unreadable",
+            500,
+        )
 
     connected = bool(result.get("connected"))
     connect_error = str(result.get("connect_error", ""))[:120]

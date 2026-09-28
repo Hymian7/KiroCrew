@@ -2938,20 +2938,29 @@ dashboard token auth.
   403). Re-runs the Socket Mode handshake in place through
   `GatewayOrchestrator.reconnect_slack`: re-reads the credential store first
   (a store that cannot be read answers 500 and leaves the live socket
-  untouched), closes the old socket client, reassigns the boot-hoisted
-  `_app_token` / `_bot_token` / `_owner_id` and RECOMPUTES `_slack_enabled`
-  from the tokens now on disk (`init_socket_mode` early-returns on a stale
-  False and its own failure paths set it False, so without this a retry after
-  any earlier failure is a silent no-op), rebuilds the Web API client, then
-  awaits `init_socket_mode` + `_connect_slack` on the gateway loop. The
-  dashboard's Slack client mirror is cleared with the old socket and published
-  again only behind a connected one (a rejected workspace leaves it empty), and
-  the dashboard's `owner_id` follows the saved owner. Concurrent calls share
-  one in-flight attempt. Answers the GET's `connected` / `connect_error` pair;
-  the reconnect names its own declines
-  as `tokens_missing`, `owner_id_missing`, `enterprise_validation_failed` and
-  `denied_by_policy`, beside Slack's own codes (`invalid_auth`) and network
-  error class names. 503 on a server that owns no Slack socket (API-only).
+  untouched), closes the old socket client (a close that fails or times out
+  ABORTS the attempt with `previous_client_close_failed`: the old client stays
+  referenced for the next attempt or shutdown to close again, nothing from the
+  store is hoisted, and the handler module's owner / allowlist are cleared so
+  a listener that outlived its credentials accepts no privileged command),
+  reassigns the boot-hoisted `_app_token` / `_bot_token` / `_owner_id` and
+  RECOMPUTES `_slack_enabled` from the tokens now on disk (`init_socket_mode`
+  early-returns on a stale False and its own failure paths set it False, so
+  without this a retry after any earlier failure is a silent no-op), rebinds
+  the handler module's owner / allowlist to the saved owner in the same step
+  (`init_socket_mode` refreshes them only on the path that reaches a
+  handshake, so a reconnect that stops at `tokens_missing` or
+  `owner_id_missing` would otherwise leave the former owner bound), rebuilds
+  the Web API client, then awaits `init_socket_mode` + `_connect_slack` on the
+  gateway loop. The dashboard's Slack client mirror is cleared with the old
+  socket and published again only behind a connected one (a rejected workspace
+  leaves it empty), and the dashboard's `owner_id` follows the saved owner.
+  Concurrent calls share one in-flight attempt. Answers the GET's `connected` /
+  `connect_error` pair; the reconnect names its own declines as
+  `tokens_missing`, `owner_id_missing`, `enterprise_validation_failed`,
+  `denied_by_policy` and `previous_client_close_failed`, beside Slack's own
+  codes (`invalid_auth`) and network error class names. 503 on a server that
+  owns no Slack socket (API-only).
 - `GET /api/slack/manifest` — public manifest template rendered with
   `?alias=` (default `kirocrew`, never `$USER`) plus Slack's one-click
   create deep link.
