@@ -210,9 +210,12 @@ def test_feed_destination_is_pointer_prefix_yaml() -> None:
     # Linux resolves BOTH halves: the channel file per arch (``FEED_FILE``) and the
     # directory per format (``FEED_PREFIX``), because two formats sharing one
     # directory would overwrite each other's channel file. The mac lane has one
-    # format, so it names both halves literally.
+    # format and so names the FILE literally, but the directory is per BUILD
+    # (``FEED_PREFIX``): the universal DMG at the channel root, a single-arch DMG
+    # one level down -- electron-updater appends no arch suffix on darwin, so
+    # the directory is the only seam (see test_mac_single_arch_legs below).
     for path, job, destination in (
-        (MAC_WORKFLOW, "publish", "feed/${CHANNEL}/latest-mac.yml"),
+        (MAC_WORKFLOW, "publish", "${FEED_PREFIX}/latest-mac.yml"),
         (LINUX_WORKFLOW, "publish-linux", "${FEED_PREFIX}/${FEED_FILE}"),
     ):
         run = _feed_step(path, job)["run"]
@@ -613,6 +616,145 @@ def test_mac_notarize_attaches_gated_artifact_fail_closed() -> None:
     assert (
         step["with"]["if-no-files-found"] == "error"
     ), "the gated artifact upload must error when empty -- it is the publish job's sole input"
+
+
+# ---------------------------------------------------------------------------
+# Single-arch macOS legs: same reusable workflow, called once per arch, every
+# shared name suffixed by the variant so three legs of one channel+version
+# never share a bucket key, an artifact name or a feed file -- and with the
+# variant empty, the universal leg's names are the literal strings they were.
+# ---------------------------------------------------------------------------
+
+NIGHTLY_WORKFLOW = WORKFLOWS / "nightly.yml"
+RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
+BUILD_DESKTOP_WORKFLOW = WORKFLOWS / "build-desktop.yml"
+_MAC_VARIANTS = ("arm64", "x64")
+
+
+def _mac_callers(path: Path) -> dict[str, dict]:
+    return {
+        name: job
+        for name, job in _jobs(path).items()
+        if str(job.get("uses", "")).endswith("/sign-and-notarize.yml")
+    }
+
+
+def test_mac_single_arch_legs_are_separate_callers_with_disjoint_artifacts() -> None:
+    """nightly.yml calls sign-and-notarize.yml once per single-arch DMG, each
+    naming its own build artifact, and the universal caller passes neither
+    input -- so the universal leg still downloads the whole run (it attests the
+    wheel/sdist/AppImage) while a single-arch leg downloads its one artifact."""
+    callers = _mac_callers(NIGHTLY_WORKFLOW)
+    universal = callers.pop("sign-and-notarize")
+    assert "mac_variant" not in universal["with"] and "mac_artifact" not in universal["with"], (
+        "the universal caller must not name a variant: its keys, artifact name and "
+        "feed path are a public contract that must stay byte-identical"
+    )
+    # The artifact names a single-arch leg downloads are the ones
+    # build-desktop-mac-single-arch uploads -- read from build-desktop.yml, not
+    # retyped, so a rename there fails here.
+    rows = _jobs(BUILD_DESKTOP_WORKFLOW)["build-desktop-mac-single-arch"]["strategy"]["matrix"][
+        "include"
+    ]
+    built = {row["artifact-name"] for row in rows}
+    seen = {}
+    for name, job in callers.items():
+        with_ = job["with"]
+        variant = with_["mac_variant"]
+        assert variant in _MAC_VARIANTS, f"{name}: mac_variant must be one of {_MAC_VARIANTS}"
+        assert with_["mac_artifact"] in built, (
+            f"{name}: mac_artifact {with_['mac_artifact']!r} is not an artifact "
+            f"build-desktop.yml's single-arch job uploads ({sorted(built)})"
+        )
+        assert with_["mac_artifact"].endswith(f"-{variant}"), f"{name}: artifact/variant mismatch"
+        assert with_["channel"] == universal["with"]["channel"]
+        assert with_["version"] == universal["with"]["version"]
+        seen[variant] = with_["mac_artifact"]
+    assert sorted(seen) == sorted(_MAC_VARIANTS), f"one caller per arch, got {sorted(seen)}"
+    assert len(set(seen.values())) == len(seen), "two legs must never download the same artifact"
+
+
+def test_mac_single_arch_legs_carry_the_shipper_gates_and_permissions() -> None:
+    """A single-arch leg publishes, so it is gated like every other shipper and
+    grants exactly what the universal caller grants (a workflow_call callee
+    cannot exceed its caller's permissions; test_workflow_permissions.py pins
+    the universal block, this pins the variants to it)."""
+    callers = _mac_callers(NIGHTLY_WORKFLOW)
+    universal = callers.pop("sign-and-notarize")
+    for name, job in callers.items():
+        assert job["permissions"] == universal["permissions"], f"{name}: permissions drift"
+        assert job["secrets"] == universal["secrets"], f"{name}: secrets drift"
+        for gate in ("dependency-vulnerability-gate", "platform-tests", "build-desktop", "version"):
+            assert gate in job["needs"], f"{name}: must `needs: {gate}` like the universal caller"
+        assert (
+            "build-wheel" not in job["needs"]
+        ), f"{name}: a single-arch leg attests no wheel, so it must not wait on build-wheel"
+
+
+def test_mac_variant_suffixes_every_shared_name() -> None:
+    """Every name the three legs would otherwise share is derived from
+    ``inputs.mac_variant``: the signing-bucket key suffix, the published
+    basename (both jobs), the gated artifact name (attached and consumed), and
+    the feed directory. Missing one means two legs overwrite each other's
+    bytes on the same channel+version -- silently, because every versioned key
+    is a conditional write that KEEPS the first writer's bytes."""
+    jobs = _jobs(MAC_WORKFLOW)
+    variant_ref = "inputs.mac_variant"
+    assert variant_ref in jobs["sign"]["env"]["SIGN_KEY_SUFFIX"]
+    for job in ("notarize", "publish"):
+        stem = jobs[job]["env"]["ARTIFACT_BASENAME"]
+        assert variant_ref in stem, f"{job}: ARTIFACT_BASENAME must carry the variant"
+        pinned_stem = "KiroCrew{0}"  # brand-ok
+        assert pinned_stem in stem, f"{job}: ARTIFACT_BASENAME stem must be the pinned basename"
+    attach = _step(jobs["notarize"]["steps"], "Attach notarized artifact to workflow run")["with"][
+        "name"
+    ]
+    consume = _step(jobs["publish"]["steps"], "Download gated artifact")["with"]["name"]
+    for expr in (attach, consume):
+        assert (
+            "KiroCrew-notarized-" in expr and variant_ref in expr
+        ), "the gated artifact name must carry the variant on both ends"
+    prefix = jobs["publish"]["env"]["FEED_PREFIX"]
+    assert (
+        variant_ref in prefix
+        and "format('feed/{0}/{1}', inputs.channel, inputs.mac_variant)" in prefix
+    )
+    assert (
+        "format('feed/{0}', inputs.channel)" in prefix
+    ), "empty variant must collapse to feed/<channel>"
+    # The suffix must reach the script that names the signing-bucket keys, and
+    # the workflow's own copy of that key must be built from the same suffix.
+    sign_sh = (ROOT / "packaging" / "signing" / "sign.sh").read_text(encoding="utf-8")
+    assert 'APP_SLUG="${APP_NAME// /-}${SIGN_KEY_SUFFIX:-}"' in sign_sh
+    sign_run = _step(jobs["sign"]["steps"], "Sign with signing service")["run"]
+    assert "${APP_SLUG}${SIGN_KEY_SUFFIX}.zip" in sign_run
+
+
+def test_mac_universal_leg_flattens_only_its_own_mac_bytes() -> None:
+    """The universal leg downloads every artifact on the run. Beside the two
+    single-arch build artifacts, a single-arch leg running in parallel may
+    already have ATTACHED its gated artifact (a notarized.zip and a second
+    DMG) to the same run; either would trip the exactly-one-DMG assertion or
+    hand the wrong zip to the signer. All three are excluded by artifact name."""
+    run = _step(_steps(MAC_WORKFLOW, "sign"), "Flatten artifacts")["run"]
+    for excluded in (
+        "artifacts/unsigned-build-darwin-arm64/*",
+        "artifacts/unsigned-build-darwin-x64/*",
+        "artifacts/KiroCrew-notarized-*/*",
+    ):
+        assert f'-not -path "{excluded}"' in run, f"flatten must exclude {excluded}"
+    attest = _step(_steps(MAC_WORKFLOW, "sign"), "Attest build provenance")
+    assert (
+        attest.get("if") == "${{ inputs.mac_variant == '' }}"
+    ), "provenance is the universal leg's: a single-arch leg holds no wheel/sdist/AppImage"
+
+
+def test_release_calls_the_universal_mac_leg_alone() -> None:
+    """release.yml records a promotion bundle with exactly one DMG, so it keeps
+    calling the universal leg only until the bundle learns per-arch roles."""
+    callers = _mac_callers(RELEASE_WORKFLOW)
+    assert list(callers) == ["sign-and-notarize"], f"release.yml mac callers: {sorted(callers)}"
+    assert "mac_variant" not in callers["sign-and-notarize"]["with"]
 
 
 # ---------------------------------------------------------------------------

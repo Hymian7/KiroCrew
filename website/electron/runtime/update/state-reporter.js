@@ -21,6 +21,7 @@ function createUpdateReporter({
   platform,
   managed,
   linux,
+  macDistArch,
   channelForFlavor,
   channelForVersion,
   resolveChannel,
@@ -152,7 +153,7 @@ function createUpdateReporter({
       platform,
       packaged: !!app.isPackaged,
       // Escape hatch for a failed install (see manualDownloadUrl).
-      downloadUrl: manualDownloadUrl(currentChannel(), osPlatform, osArch, linux.format),
+      downloadUrl: manualDownloadUrl(currentChannel(), osPlatform, osArch, linux.format, macDistArch),
       // Replay seed for a freshly mounted renderer (see lastEmittedState).
       lastState: lastEmittedState,
     };

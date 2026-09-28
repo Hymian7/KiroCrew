@@ -13,6 +13,9 @@ const {
   canRewriteMarker,
   DEFAULT_FEED_BASE,
   SUPPORTED_PLATFORMS,
+  resolveMacDistArch,
+  manualDownloadUrl,
+  DOWNLOAD_BASE,
 } = require("../auto-update");
 
 // ---------------------------------------------------------------------------
@@ -98,6 +101,89 @@ test("an explicit insider preference still selects insider on promoted bytes", a
     `expected insider feed urls, got: ${calls.setFeedURL.map((o) => o.url)}`,
   );
   assert.strictEqual(u.getInfo().channel, "insider");
+});
+
+// ---------------------------------------------------------------------------
+// Single-arch macOS builds follow their OWN feed directory. electron-updater
+// names the channel file from the platform alone on darwin (latest-mac.yml,
+// no arch suffix), so feed/<channel>/<arch>/ -- the directory
+// sign-and-notarize.yml's mac_variant legs write -- is the only seam, and the
+// universal build (no stamp) must keep reading the channel root untouched.
+// ---------------------------------------------------------------------------
+
+test("a universal mac build (no stamp) reads the channel root, as before", async () => {
+  const { deps, calls } = makeDeps({ appVersion: "1.0.0" });
+  deps.macDistArch = "";
+  const u = initAutoUpdate(deps);
+  await u.check();
+  assert.ok(calls.setFeedURL.length >= 1);
+  assert.ok(
+    calls.setFeedURL.every((o) => o.url === "https://cdn.example.dev/feed/stable/"),
+    `expected the universal channel root, got: ${calls.setFeedURL.map((o) => o.url)}`,
+  );
+  assert.strictEqual(u.getInfo().downloadUrl, `${DOWNLOAD_BASE}/desktop/stable/latest/KiroCrew.dmg`);
+});
+
+test("an arm64-only mac build reads feed/<channel>/arm64/ and is offered its own DMG", async () => {
+  const { deps, calls } = makeDeps({ appVersion: "1.0.0" });
+  deps.macDistArch = "arm64";
+  const u = initAutoUpdate(deps);
+  await u.check();
+  assert.ok(calls.setFeedURL.length >= 1);
+  assert.ok(
+    calls.setFeedURL.every((o) => o.url === "https://cdn.example.dev/feed/stable/arm64/"),
+    `expected the arm64 feed directory, got: ${calls.setFeedURL.map((o) => o.url)}`,
+  );
+  assert.strictEqual(u.getInfo().downloadUrl, `${DOWNLOAD_BASE}/desktop/stable/latest/KiroCrew-arm64.dmg`);
+});
+
+test("an x64-only mac build reads feed/<channel>/x64/ whatever the host arch says", async () => {
+  // An x64-only app under Rosetta on Apple Silicon still reports the BUILD's
+  // arch: the feed it follows is a property of the bytes on disk, not the CPU.
+  const { deps, calls } = makeDeps({ appVersion: "1.0.0" });
+  deps.macDistArch = "x64";
+  deps.osArch = "arm64";
+  const u = initAutoUpdate(deps);
+  await u.check();
+  assert.ok(
+    calls.setFeedURL.every((o) => o.url === "https://cdn.example.dev/feed/stable/x64/"),
+    `expected the x64 feed directory, got: ${calls.setFeedURL.map((o) => o.url)}`,
+  );
+  assert.strictEqual(u.getInfo().downloadUrl, `${DOWNLOAD_BASE}/desktop/stable/latest/KiroCrew-x64.dmg`);
+});
+
+test("manualDownloadUrl: the mac DMG follows the BUILD arch, not the host arch", () => {
+  assert.strictEqual(
+    manualDownloadUrl("nightly", "darwin", "arm64", "", ""),
+    `${DOWNLOAD_BASE}/desktop/nightly/latest/KiroCrew.dmg`,
+  );
+  assert.strictEqual(
+    manualDownloadUrl("nightly", "darwin", "arm64", "", "arm64"),
+    `${DOWNLOAD_BASE}/desktop/nightly/latest/KiroCrew-arm64.dmg`,
+  );
+  assert.strictEqual(
+    manualDownloadUrl("nightly", "darwin", "arm64", "", "x64"),
+    `${DOWNLOAD_BASE}/desktop/nightly/latest/KiroCrew-x64.dmg`,
+  );
+  // The stamp is mac-only: a Linux install never grows a mac suffix from it.
+  assert.strictEqual(
+    manualDownloadUrl("stable", "linux", "x64", "", "arm64"),
+    `${DOWNLOAD_BASE}/desktop/stable/latest/KiroCrew-x86_64.AppImage`,
+  );
+});
+
+test("resolveMacDistArch: the stamp, and nothing but the two known values", () => {
+  assert.strictEqual(resolveMacDistArch({ readPackageJson: () => ({ desktopDistArch: "arm64" }) }), "arm64");
+  assert.strictEqual(resolveMacDistArch({ readPackageJson: () => ({ desktopDistArch: "x64" }) }), "x64");
+  // Unstamped = universal. So is anything the build never writes: an unknown
+  // value or an unreadable package.json must fall back to the universal feed
+  // (which every mac install can run), never throw on the update path.
+  assert.strictEqual(resolveMacDistArch({ readPackageJson: () => ({}) }), "");
+  assert.strictEqual(resolveMacDistArch({ readPackageJson: () => ({ desktopDistArch: "universal" }) }), "");
+  assert.strictEqual(resolveMacDistArch({ readPackageJson: () => ({ desktopDistArch: "x86_64" }) }), "");
+  assert.strictEqual(resolveMacDistArch({ readPackageJson: () => { throw new Error("boom"); } }), "");
+  // The repo's own package.json carries no stamp: a dev run is universal.
+  assert.strictEqual(resolveMacDistArch(), "");
 });
 
 // ---------------------------------------------------------------------------
@@ -2702,6 +2788,7 @@ const AUTO_UPDATE_EXPORTS = [
   "classifyError",
   "manualDownloadUrl",
   "resolveLinuxInstall",
+  "resolveMacDistArch",
   "readExternallyManaged",
   "canRewriteMarker",
   "DEFAULT_FEED_BASE",
@@ -2709,7 +2796,7 @@ const AUTO_UPDATE_EXPORTS = [
   "SUPPORTED_PLATFORMS",
 ];
 
-test("the facade exports exactly its sixteen names, in order", () => {
+test("the facade exports exactly its seventeen names, in order", () => {
   assert.deepStrictEqual(Object.keys(require("../auto-update")), AUTO_UPDATE_EXPORTS);
 });
 

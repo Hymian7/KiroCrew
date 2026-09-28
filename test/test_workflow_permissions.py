@@ -144,6 +144,14 @@ class TestNightlyPermissions:
             "contents": "read",
             "attestations": "write",
         }
+        # The two single-arch macOS legs call the same reusable workflow and
+        # need the same three grants (the notarize job attests their DMG too).
+        for job in ("  sign-and-notarize-arm64:", "  sign-and-notarize-x64:"):
+            assert _permission_block(lines, job) == {
+                "id-token": "write",
+                "contents": "read",
+                "attestations": "write",
+            }
 
 
 class TestReleasePermissions:

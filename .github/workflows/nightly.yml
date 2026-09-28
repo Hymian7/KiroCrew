@@ -490,11 +490,13 @@ jobs:
       # reads "this version has both arches". release.yml does record that
       # claim and therefore keeps the default (false).
       soft_fail_arm64: true
-      # Also build the arm64-only and x86_64-only macOS DMGs, as build-only
-      # artifacts on the run (unsigned-build-darwin-arm64 / -x64). Nothing
-      # here publishes them: sign-and-notarize.yml excludes those two artifact
-      # names, so the universal DMG is still the only mac bytes that lane sees.
-      # release.yml keeps the default (false).
+      # Also build the arm64-only and x86_64-only macOS DMGs
+      # (unsigned-build-darwin-arm64 / -x64). Each is signed, notarized and
+      # fed by its OWN sign-and-notarize caller below (mac_variant), under
+      # feed/nightly/<arch>/; the universal caller still excludes both
+      # artifact names, so the universal DMG stays the only mac bytes it sees.
+      # release.yml keeps the default (false): the stable promotion bundle
+      # records exactly one DMG, and per-arch stable is a later change.
       mac_single_arch: true
 
   # Windows builds in its own workflow because it Authenticode-signs during the
@@ -777,3 +779,51 @@ jobs:
       channel: nightly
       version: ${{ needs.version.outputs.nightly_version }}
       write_feed: true
+
+  # The two single-arch macOS legs: one sign-and-notarize call each, differing
+  # from the universal caller above in `mac_variant` + `mac_artifact` alone.
+  # Same gates (dependency audit, macOS platform suite) as every other
+  # shipper. NOT `needs: build-wheel`: a single-arch leg downloads only its
+  # own build artifact and attests no wheel. Their build job is
+  # continue-on-error in build-desktop.yml so the universal leg is never held
+  # by them; when that build failed, the leg here fails at download-artifact,
+  # which is the right colour for a lane that now publishes.
+  sign-and-notarize-arm64:
+    name: Sign + Notarize macOS (arm64 only)
+    needs: [version, build-desktop, dependency-vulnerability-gate, platform-tests]
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    uses: ./.github/workflows/sign-and-notarize.yml
+    secrets:
+      AWS_SIGNING_ROLE_ARN: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
+      AWS_SIGNING_BUCKET: ${{ secrets.AWS_SIGNING_BUCKET }}
+      AWS_SIGNER_ACCESS_ROLE_ARN: ${{ secrets.AWS_SIGNER_ACCESS_ROLE_ARN }}
+      CDSIGNER_API_ENDPOINT: ${{ secrets.CDSIGNER_API_ENDPOINT }}
+    with:
+      channel: nightly
+      version: ${{ needs.version.outputs.nightly_version }}
+      write_feed: true
+      mac_variant: arm64
+      mac_artifact: unsigned-build-darwin-arm64
+
+  sign-and-notarize-x64:
+    name: Sign + Notarize macOS (x64 only)
+    needs: [version, build-desktop, dependency-vulnerability-gate, platform-tests]
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+    uses: ./.github/workflows/sign-and-notarize.yml
+    secrets:
+      AWS_SIGNING_ROLE_ARN: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
+      AWS_SIGNING_BUCKET: ${{ secrets.AWS_SIGNING_BUCKET }}
+      AWS_SIGNER_ACCESS_ROLE_ARN: ${{ secrets.AWS_SIGNER_ACCESS_ROLE_ARN }}
+      CDSIGNER_API_ENDPOINT: ${{ secrets.CDSIGNER_API_ENDPOINT }}
+    with:
+      channel: nightly
+      version: ${{ needs.version.outputs.nightly_version }}
+      write_feed: true
+      mac_variant: x64
+      mac_artifact: unsigned-build-darwin-x64

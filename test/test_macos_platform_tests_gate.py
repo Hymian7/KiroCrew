@@ -253,6 +253,8 @@ class TestARedMacSuiteHoldsPublicationAndNeverABuild:
                 "publish-linux-rpm-x64",
                 "publish-windows-x64",
                 "sign-and-notarize",
+                "sign-and-notarize-arm64",
+                "sign-and-notarize-x64",
             ]
         )
         # No build job may grow this `needs:`. Gating the builds is what blocked the

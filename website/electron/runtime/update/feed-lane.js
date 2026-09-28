@@ -28,6 +28,7 @@ function createFeedLane({
   onInstallFailed,
   osPlatform,
   linux,
+  macDistArch,
   nativeAutoUpdater,
   feedBase,
   uiDriven,
@@ -112,8 +113,11 @@ function createFeedLane({
     // than a currentChannel() that may have changed since (see feedChannel).
     feedChannel = channel;
     // A package install reads its channel file from a per-format subdirectory,
-    // so the two Linux formats never overwrite each other's metadata.
-    const url = buildFeedBase({ base: feedBase, channel, variant: linux.format });
+    // so the two Linux formats never overwrite each other's metadata; a
+    // single-arch mac build reads its own per-arch subdirectory for the same
+    // reason (the universal build's variant is "", i.e. the channel root).
+    const variant = osPlatform === "darwin" ? macDistArch : linux.format;
+    const url = buildFeedBase({ base: feedBase, channel, variant });
     autoUpdater.setFeedURL({ provider: "generic", url });
     log.info(`[update] feed: ${url}`);
     return url;

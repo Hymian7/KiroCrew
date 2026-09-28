@@ -1445,10 +1445,19 @@ log "Packaging desktop app (electron-builder, version: $KC_VERSION)…"
       # (platform-wide), so the DMG drops the "-mac" that the zip keeps --
       # the zip suffix is what sign-and-notarize.yml's "*-mac.zip" match and
       # electron-updater's per-arch feed lookup both key on.
+      #
+      # extraMetadata.desktopDistArch stamps the arch INTO the app's own
+      # package.json, which is how the running app learns which build it is:
+      # process.arch cannot tell a single-arch app from the universal one
+      # (both answer "arm64" on Apple Silicon), and the feed the app must
+      # follow differs -- website/electron/auto-update.js reads this field
+      # and, when set, resolves feed/<channel>/<arch>/latest-mac.yml instead
+      # of the universal channel file. Universal builds leave it unset.
       EB_ARGS+=(
         "--${EB_ARCH}"
         '-c.mac.artifactName=${productName}-${version}-${arch}-mac.${ext}'
         '-c.dmg.artifactName=${productName}-${version}-${arch}.${ext}'
+        "-c.extraMetadata.desktopDistArch=${EB_ARCH}"
       )
     fi
     run_electron_builder_with_retry "${EB_ARGS[@]}"

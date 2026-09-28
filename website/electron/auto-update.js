@@ -62,6 +62,46 @@ const { createFeedLane } = require("./runtime/update/feed-lane");
 // AppImage — instead of pointing an rpm install at deb bytes either way.
 const LINUX_PACKAGE_EXTENSIONS = new Set(["deb", "rpm"]);
 
+// The two single-arch macOS builds, spelled the way electron-builder spells
+// the arch (its ${arch} artifact macro) and the way sign-and-notarize.yml names
+// the per-arch feed directory and DMG suffix. The universal build is the
+// absence of a stamp, never a third value, so the default path stays the
+// universal one.
+const MAC_DIST_ARCHES = new Set(["arm64", "x64"]);
+
+/**
+ * Which macOS build this app is: "" for the universal DMG, "arm64" / "x64" for
+ * a single-arch one. Read from the app's OWN package.json, where
+ * packaging/build-desktop.sh stamps `desktopDistArch` via electron-builder's
+ * extraMetadata on the single-arch legs and nothing on the universal one.
+ *
+ * WHY a build-time stamp and not process.arch: a universal app and an
+ * arm64-only app both answer "arm64" on Apple Silicon, yet they must follow
+ * different feeds -- a universal client fed the arm64-only zip would lose its
+ * x86_64 slice on the next update, silently, and the reverse would double the
+ * download the single-arch install was chosen to avoid. Only the build knows
+ * which one it produced.
+ *
+ * Fail-safe direction: an unreadable package.json or an unknown value resolves
+ * to "" -- the universal feed, which every mac install could run -- rather than
+ * throwing on the one path that exists to keep the app updatable.
+ *
+ * @param {object} [o]
+ * @param {() => any} [o.readPackageJson] injected for tests; defaults to the
+ *   app's package.json, resolved relative to this module (inside app.asar when
+ *   packaged), which is where extraMetadata lands.
+ * @returns {string}
+ */
+function resolveMacDistArch({ readPackageJson = () => require("./package.json") } = {}) {
+  let value = "";
+  try {
+    value = String((readPackageJson() || {}).desktopDistArch || "");
+  } catch {
+    return "";
+  }
+  return MAC_DIST_ARCHES.has(value) ? value : "";
+}
+
 /**
  * Which Linux install shape is running, resolved from the three signals that
  * exist at runtime. I/O-bearing (it reads the package-type file), so it sits
@@ -627,7 +667,11 @@ function shouldAutoOffer({ candidate, current, followedChannel, defaultChannel }
  * file NAME from platform and arch with no hook to change it, so two formats
  * cannot share a directory without one overwriting the other's metadata.
  * Separating them by directory leaves that derivation — including the
- * `-arm64` suffix — completely untouched.
+ * `-arm64` suffix — completely untouched. The single-arch macOS builds ride
+ * the same seam: electron-updater appends NO arch suffix on darwin, so
+ * feed/<channel>/arm64/ and feed/<channel>/x64/ (written by
+ * sign-and-notarize.yml's mac_variant legs) are the only way an arm64-only
+ * app and the universal app can each read their own latest-mac.yml.
  *
  * @param {{base:string, channel:string, variant?:string}} o
  * @returns {string}
@@ -666,11 +710,18 @@ function buildFeedBase({ base, channel, variant = "" }) {
  * @param {string} [osArch]   process.arch value; defaults to the running arch
  * @param {string} [linuxFormat] resolved package format ("deb"/"rpm"), or "" for
  *        an AppImage / unknown shape
+ * @param {string} [macDistArch] which macOS build this is: "" (universal) or
+ *        "arm64" / "x64" (see resolveMacDistArch)
  * @returns {string|null}
  */
-function manualDownloadUrl(channel, osPlatform, osArch = process.arch, linuxFormat = "") {
+function manualDownloadUrl(channel, osPlatform, osArch = process.arch, linuxFormat = "", macDistArch = "") {
   if (!channelHasLane(channel)) return null;
-  // The mac DMG is universal, so darwin needs no arch. Linux has no universal
+  // On darwin the arch comes from the BUILD, not the host: the universal DMG
+  // runs anywhere, so a universal install is offered KiroCrew.dmg whatever
+  // process.arch says, and a single-arch install is offered its own DMG
+  // (KiroCrew-arm64.dmg / KiroCrew-x64.dmg, the latest aliases
+  // sign-and-notarize.yml's mac_variant legs write) so a reinstall keeps the
+  // install the user chose. Linux has no universal
   // binary: publish-linux.yml publishes one artifact per arch per format under
   // the basenames below, so handing a user the wrong one is an immediate
   // "cannot execute binary file" — or, for a package, one dpkg/rpm refuses.
@@ -690,8 +741,9 @@ function manualDownloadUrl(channel, osPlatform, osArch = process.arch, linuxForm
   // suffix for linux alone), so a second arch means another entry in the same
   // latest.yml rather than another feed.
   const windowsFile = { x64: "KiroCrew-Setup.exe" }[osArch];
+  const macFile = MAC_DIST_ARCHES.has(macDistArch) ? `KiroCrew-${macDistArch}.dmg` : "KiroCrew.dmg"; // brand-ok
   const file = osPlatform === "darwin"
-    ? "KiroCrew.dmg"
+    ? macFile
     : osPlatform === "linux"
       ? linuxFile || null
       : osPlatform === "win32"
@@ -843,7 +895,12 @@ function classifyError(err) {
  * @param {string} [deps.osPlatform]           - process.platform override (tests)
  * @param {string} [deps.osArch]               - process.arch override (tests). Picks the
  *   per-arch Linux AppImage for the manual-reinstall link; darwin ignores it
- *   (the DMG is universal).
+ *   (which mac DMG to offer is a property of the BUILD, see macDistArch).
+ * @param {string} [deps.macDistArch]          - which macOS build this is: "" for the
+ *   universal DMG, "arm64" / "x64" for a single-arch one. Selects the feed
+ *   directory and the manual-reinstall DMG. Defaults to the stamp in the app's
+ *   own package.json (resolveMacDistArch); injected so tests can assert the
+ *   per-arch routing without a packaged build.
  * @param {string} [deps.platform]             - display platform override (tests);
  *   defaults to `${osPlatform}-${osArch}`
  * @param {string} [deps.resourcesPath]        - process.resourcesPath override
@@ -902,6 +959,10 @@ function initAutoUpdate(deps) {
     // test without a real AppImage mount or a real /opt install.
     linuxInstall = null,
     probeAppImageWritable = isAppImageContainerWritable,
+    // Which macOS build this is (see resolveMacDistArch). Resolved once: it
+    // is a build-time constant, and it must exist before getInfo() is defined
+    // for the same temporal-dead-zone reason as `linux` below.
+    macDistArch = osPlatform === "darwin" ? resolveMacDistArch() : "",
     // Externally-managed verdict, injected for the same reason as linuxInstall:
     // assertable in tests without a real marker file. undefined = read the
     // marker from disk; null = not managed; object = managed.
@@ -955,6 +1016,7 @@ function initAutoUpdate(deps) {
     platform,
     managed,
     linux,
+    macDistArch,
     channelForFlavor,
     channelForVersion,
     resolveChannel,
@@ -1092,6 +1154,7 @@ function initAutoUpdate(deps) {
     onInstallFailed,
     osPlatform,
     linux,
+    macDistArch,
     nativeAutoUpdater,
     feedBase,
     uiDriven,
@@ -1119,6 +1182,7 @@ module.exports = {
   classifyError,
   manualDownloadUrl,
   resolveLinuxInstall,
+  resolveMacDistArch,
   readExternallyManaged,
   canRewriteMarker,
   DEFAULT_FEED_BASE,

@@ -28,6 +28,32 @@ name: Sign and Notarize macOS (reusable)
 # in this trust chain. It ships from publish-linux.yml, its own lane
 # called directly by nightly.yml / release.yml beside publish-cli.yml.)
 #
+# Single-arch legs (mac_variant: arm64 | x64). The same three jobs run once
+# more per single-arch DMG that build-desktop.yml's mac_single_arch job
+# produced, each as its OWN workflow_call from the caller (nightly.yml today;
+# release.yml still calls the universal leg alone). One input changes four
+# names and nothing else:
+#   - the run downloads ONLY `mac_artifact` (unsigned-build-darwin-<arch>)
+#     instead of every artifact on the run, so the wheel/sdist/AppImage
+#     provenance step is the universal leg's alone (`if` below);
+#   - every bucket key that the .app name alone used to derive gets a
+#     "-<arch>" suffix (SIGN_KEY_SUFFIX -> packaging/signing/sign.sh,
+#     ARTIFACT_BASENAME -> notarized/, desktop/ and the latest-DMG alias), so
+#     three legs signing the same channel+version cannot overwrite each
+#     other's request or read back another leg's bytes;
+#   - the gated artifact is KiroCrew-notarized-<channel>-<version>-<arch>;
+#   - the channel file lands at feed/<channel>/<arch>/latest-mac.yml
+#     (FEED_PREFIX), one directory below the universal one, which is how
+#     website/electron/auto-update.js's `variant` already separates the two
+#     Linux package formats: electron-updater derives the file NAME from the
+#     platform with no arch suffix on macOS, so the DIRECTORY is the only
+#     seam. A single-arch app reads `desktopDistArch` from its own
+#     package.json (stamped by packaging/build-desktop.sh) and resolves that
+#     directory; the universal app has no stamp and keeps resolving
+#     feed/<channel>/latest-mac.yml, whose bytes this change never touches.
+# With mac_variant empty, every expression below collapses to the exact
+# string it was before, so the universal leg is byte-for-byte unchanged.
+#
 # DMG history (2026-07-21): the DMG was briefly withdrawn after a field
 # defect -- hdiutil-created DMGs carry an ADHOC signature, which the Apple
 # notary service Accepts but Gatekeeper treats as "no usable signature",
@@ -70,10 +96,28 @@ on:
         required: true
         type: string
       write_feed:
-        description: "Publish to the distribution bucket and write feed/<channel>/latest-mac.yml"
+        description: "Publish to the distribution bucket and write feed/<channel>[/<mac_variant>]/latest-mac.yml"
         required: false
         type: boolean
         default: true
+      mac_variant:
+        description: >-
+          Single-arch leg: arm64 | x64, or empty for the universal DMG.
+          Suffixes every bucket key and the gated artifact with -<arch> and
+          writes the channel file one directory down
+          (feed/<channel>/<arch>/latest-mac.yml). See the header note.
+        required: false
+        type: string
+        default: ""
+      mac_artifact:
+        description: >-
+          Name of the ONE build artifact to download (the single-arch legs
+          pass unsigned-build-darwin-<arch>). Empty downloads every artifact
+          on the run, which is what the universal leg needs for the
+          wheel/sdist/AppImage provenance it also attests.
+        required: false
+        type: string
+        default: ""
       promote:
         description: "Publish an already notarized candidate bundle without rebuilding"
         required: false
@@ -137,37 +181,55 @@ jobs:
       HAS_CDSIGNER: ${{ secrets.CDSIGNER_API_ENDPOINT != '' && 'true' || '' }}
       CHANNEL: ${{ inputs.channel }}
       VERSION: ${{ inputs.version }}
+      # "-<arch>" on a single-arch leg, empty on the universal one. Read by
+      # packaging/signing/sign.sh (bucket keys) and mirrored into
+      # signed_zip_key below, which must name the same object.
+      SIGN_KEY_SUFFIX: ${{ inputs.mac_variant != '' && format('-{0}', inputs.mac_variant) || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: packaging/signing
           persist-credentials: false
 
+      # An empty `name` is "not given" to download-artifact, which then
+      # downloads every artifact on the run into artifacts/<name>/ -- the
+      # universal leg. A single-arch leg names its one build artifact, whose
+      # files land directly under artifacts/.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: ${{ inputs.mac_artifact }}
           path: artifacts
 
       - name: Flatten artifacts
-        # Every artifact of the run lands under artifacts/<artifact-name>/.
-        # The two single-arch macOS artifacts (build-desktop.yml's
-        # `build-desktop-mac-single-arch` job, on when the caller passes
-        # `mac_single_arch: true`) are build-only and stay OUT of release/:
+        # On the universal leg every artifact of the run lands under
+        # artifacts/<artifact-name>/, and this lane signs and feeds ONE DMG:
         # the "*-mac.zip | head -1" pick and the exactly-one-DMG assertion
-        # below both assume the universal build is the only mac artifact here,
-        # and this lane signs and feeds one DMG. Excluding them by artifact
-        # name (not by file name) keeps the universal path byte-identical to
-        # before those legs existed. Per-arch signing gets its own lane.
+        # below both assume the universal build is the only mac artifact in
+        # release/. So the two single-arch build artifacts (build-desktop.yml's
+        # `build-desktop-mac-single-arch` job) stay OUT, and so does any gated
+        # artifact a single-arch leg running IN PARALLEL may already have
+        # attached to this run (KiroCrew-notarized-<channel>-<version>-<arch>,
+        # holding a notarized.zip and a second DMG). Excluding by artifact
+        # name, not by file name, keeps the universal path byte-identical.
+        # On a single-arch leg the one named artifact lands directly under
+        # artifacts/, so none of these paths match and the find copies its
+        # zip and DMG alone.
         run: |
           mkdir -p release
           find artifacts -type f \
             -not -path "artifacts/unsigned-build-darwin-arm64/*" \
             -not -path "artifacts/unsigned-build-darwin-x64/*" \
+            -not -path "artifacts/KiroCrew-notarized-*/*" \
             \( -name "*.whl" -o -name "*.tar.gz" -o -name "*.dmg" -o -name "*.zip" -o -name "*.AppImage" \) -exec cp {} release/ \;
           ls -la release/
 
       - name: Attest build provenance
         # Signed SLSA provenance for the wheel/sdist/AppImage (CWE-1104).
         # Runs right after flatten, before anything leaves the runner.
+        # Universal leg only: a single-arch leg downloaded nothing but its
+        # mac zip and DMG, neither of which is attested here (see below), and
+        # the action fails on an empty subject set.
+        if: ${{ inputs.mac_variant == '' }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           # Attest only artifacts whose bytes are final here. The macOS .zip is
@@ -245,7 +307,8 @@ jobs:
           # slug of the bundle name ("KiroCrew Nightly" -> "KiroCrew-Nightly").
           APP_SLUG="$(basename "$APP_PATH" .app)"
           APP_SLUG="${APP_SLUG// /-}"
-          echo "signed_zip_key=signed/${CHANNEL}/${VERSION}/${APP_SLUG}.zip" >> "$GITHUB_OUTPUT"
+          # Same key sign.sh wrote: slug + SIGN_KEY_SUFFIX (empty on universal).
+          echo "signed_zip_key=signed/${CHANNEL}/${VERSION}/${APP_SLUG}${SIGN_KEY_SUFFIX}.zip" >> "$GITHUB_OUTPUT"
           shopt -s nullglob
           UNSIGNED_DMGS=(release/*.dmg)
           shopt -u nullglob
@@ -304,8 +367,11 @@ jobs:
       # though the nightly BUNDLE is "KiroCrew Nightly.app": CDN keys and the
       # latest-DMG permalink (desktop/<channel>/latest/KiroCrew.dmg) are a
       # public contract, and deriving filenames from the bundle name would
-      # silently rename the keys and break the permalink.
-      ARTIFACT_BASENAME: KiroCrew
+      # silently rename the keys and break the permalink. A single-arch leg
+      # appends its arch (KiroCrew-arm64 / KiroCrew-x64): the stem of the
+      # notarized/ and desktop/ keys, the shipping DMG and the latest-DMG
+      # alias, so three legs of one channel+version never share a key.
+      ARTIFACT_BASENAME: ${{ format('KiroCrew{0}', inputs.mac_variant != '' && format('-{0}', inputs.mac_variant) || '') }} # brand-ok
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -479,7 +545,7 @@ jobs:
         if: env.HAS_SIGNING_SECRETS
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: KiroCrew-notarized-${{ inputs.channel }}-${{ inputs.version }}
+          name: ${{ format('KiroCrew-notarized-{0}-{1}{2}', inputs.channel, inputs.version, inputs.mac_variant != '' && format('-{0}', inputs.mac_variant) || '') }}
           path: |
             work/notarized.zip
             work/*.dmg
@@ -520,7 +586,17 @@ jobs:
       CHANNEL: ${{ inputs.channel }}
       VERSION: ${{ inputs.version }}
       # Pinned published basename -- see the notarize job's env comment.
-      ARTIFACT_BASENAME: KiroCrew
+      ARTIFACT_BASENAME: ${{ format('KiroCrew{0}', inputs.mac_variant != '' && format('-{0}', inputs.mac_variant) || '') }} # brand-ok
+      # Directory the channel file lives in: feed/<channel> for the universal
+      # DMG, feed/<channel>/<arch> for a single-arch one. The file name inside
+      # it is always latest-mac.yml -- electron-updater derives that from the
+      # platform alone, so a per-arch feed can only differ by directory, the
+      # same seam auto-update.js's `variant` already uses for Linux formats.
+      # The legacy latest-mac.json bridge follows the same directory: no
+      # pre-electron-updater client ever ran a single-arch build, so under an
+      # arch directory it is inert, and keeping it lets every pointer step
+      # carry one gate (test_feed_chain_steps_share_one_skip_gate).
+      FEED_PREFIX: ${{ inputs.mac_variant != '' && format('feed/{0}/{1}', inputs.channel, inputs.mac_variant) || format('feed/{0}', inputs.channel) }}
     steps:
       # UNCONDITIONAL, and it has to stay that way. This used to be gated on
       # `inputs.promote` because only the promotion path read repo files
@@ -546,7 +622,7 @@ jobs:
         if: env.HAS_SIGNING_SECRETS
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ${{ inputs.promote && inputs.promotion_artifact || format('KiroCrew-notarized-{0}-{1}', inputs.channel, inputs.version) }}
+          name: ${{ inputs.promote && inputs.promotion_artifact || format('KiroCrew-notarized-{0}-{1}{2}', inputs.channel, inputs.version, inputs.mac_variant != '' && format('-{0}', inputs.mac_variant) || '') }}
           path: work
 
       - name: Verify immutable promotion bundle
@@ -749,7 +825,7 @@ jobs:
           # degraded evidence -- the exact rollback this guard prevents.
           FEED_HTTP=$(curl -sS --retry 3 --retry-delay 2 \
             -o /tmp/current-feed.yml -w '%{http_code}' \
-            "${{ vars.CLI_CDN_BASE }}/feed/${CHANNEL}/latest-mac.yml") \
+            "${{ vars.CLI_CDN_BASE }}/${FEED_PREFIX}/latest-mac.yml") \
             || { echo "::error::channel feed fetch failed (transport)"; exit 1; }
           case "$FEED_HTTP" in
             200) ;;
@@ -766,7 +842,7 @@ jobs:
             --tags-file /tmp/repo-tags.txt --self "${GITHUB_REF_NAME}" || true)
           if [ "$VERDICT" = "hold" ]; then
             echo "advance=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::feed/${CHANNEL}/latest-mac.yml already serves a newer version; pointer NOT moved (hotfix on an old line). Versioned assets are published."
+            echo "::notice::${FEED_PREFIX}/latest-mac.yml already serves a newer version; pointer NOT moved (hotfix on an old line). Versioned assets are published."
             exit 0
           elif [ "$VERDICT" != "advance" ]; then
             echo "::error::feed guard returned neither advance nor hold (got: '${VERDICT}')"
@@ -787,10 +863,10 @@ jobs:
           releaseDate: '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
           EOF
           aws s3 cp /tmp/latest-mac.yml \
-            "s3://${{ vars.CLI_DIST_BUCKET }}/feed/${CHANNEL}/latest-mac.yml" \
+            "s3://${{ vars.CLI_DIST_BUCKET }}/${FEED_PREFIX}/latest-mac.yml" \
             --content-type text/yaml \
             --cache-control "public, max-age=300"
-          echo "Feed written: feed/${CHANNEL}/latest-mac.yml -> ${{ vars.CLI_CDN_BASE }}/${DESKTOP_KEY}"
+          echo "Feed written: ${FEED_PREFIX}/latest-mac.yml -> ${{ vars.CLI_CDN_BASE }}/${DESKTOP_KEY}"
           # Verify the header CLIENTS actually receive, through the public CDN.
           # Carried over from #709, which fixed a real incident: a feed served
           # WITHOUT Cache-Control got heuristically cached and the updater
@@ -806,7 +882,7 @@ jobs:
           # a guard that fails on permissions instead of on the condition it
           # guards.
           FEED_CC=$(curl -fsS --retry 3 --retry-delay 2 \
-            -I "${{ vars.CLI_CDN_BASE }}/feed/${CHANNEL}/latest-mac.yml" \
+            -I "${{ vars.CLI_CDN_BASE }}/${FEED_PREFIX}/latest-mac.yml" \
             | tr -d '\r' | awk -F': ' 'tolower($1)=="cache-control"{print $2}')
           echo "Feed Cache-Control as served: ${FEED_CC:-<none>}"
           case "$FEED_CC" in
@@ -848,10 +924,10 @@ jobs:
           }
           EOF
           aws s3 cp /tmp/latest-mac.json \
-            "s3://${{ vars.CLI_DIST_BUCKET }}/feed/${CHANNEL}/latest-mac.json" \
+            "s3://${{ vars.CLI_DIST_BUCKET }}/${FEED_PREFIX}/latest-mac.json" \
             --content-type application/json \
             --cache-control "public, max-age=300"
-          echo "Legacy feed written: feed/${CHANNEL}/latest-mac.json (transition bridge)"
+          echo "Legacy feed written: ${FEED_PREFIX}/latest-mac.json (transition bridge)"
           # Verify the header CLIENTS actually receive, through the public CDN.
           # NOT `s3api head-object`: the publish role is Put-only on feed/*
           # (KiroCrewPublishCDK distribution-stack.ts grants s3:GetObject on
@@ -864,7 +940,7 @@ jobs:
           # distribution, and feed/* is CACHING_DISABLED, so this response
           # comes from origin and reflects the object just written.
           FEED_CC=$(curl -fsS --retry 3 --retry-delay 2 \
-            -I "${{ vars.CLI_CDN_BASE }}/feed/${CHANNEL}/latest-mac.json" \
+            -I "${{ vars.CLI_CDN_BASE }}/${FEED_PREFIX}/latest-mac.json" \
             | tr -d '\r' | sed -n 's/^[Cc]ache-[Cc]ontrol: //p' | head -1)
           if [ "${FEED_CC}" != "public, max-age=300" ]; then
             echo "::error::feed Cache-Control is '${FEED_CC}', expected 'public, max-age=300' -- a feed served without explicit freshness lets clients heuristically cache a stale pointer"
@@ -912,7 +988,7 @@ jobs:
             echo "- Public DMG: ${{ vars.CLI_CDN_BASE }}/${DMG_KEY}"
             if [ "${{ steps.feed.outputs.advance }}" = "true" ]; then
               echo "- Latest DMG alias: ${{ vars.CLI_CDN_BASE }}/${LATEST_DMG_KEY}"
-              echo "- Feed: \`feed/${CHANNEL}/latest-mac.yml\`"
+              echo "- Feed: \`${FEED_PREFIX}/latest-mac.yml\`"
             else
               echo "- Feed: not moved (channel already serves a newer version)"
             fi

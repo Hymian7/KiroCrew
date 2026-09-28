@@ -275,20 +275,32 @@ it builds the full matrix and uploads artifacts, with no publish lane attached.
 Anything you **distribute** for macOS should be the universal DMG — the
 host-arch build is a local-machine artifact.
 
-**Single-arch macOS DMGs in CI (opt-in, build-only).** `build-desktop.yml` has
-a second macOS job, `build-desktop-mac-single-arch`, behind the boolean input
+**Single-arch macOS DMGs in CI (opt-in).** `build-desktop.yml` has a second
+macOS job, `build-desktop-mac-single-arch`, behind the boolean input
 `mac_single_arch` (default `false`; `nightly.yml` passes `true`, `release.yml`
 keeps the default). When on, it runs the script twice on `macos-15` —
 `UNIVERSAL=0 TARGET_ARCH=arm64` and
 `UNIVERSAL=0 TARGET_ARCH=x86_64` — and uploads `unsigned-build-darwin-arm64`
-and `unsigned-build-darwin-x64` beside `unsigned-build-darwin-universal`.
-Nothing downstream consumes them: `sign-and-notarize.yml` excludes those two
-artifact names when it flattens the run's artifacts, so its "first `*-mac.zip`"
-pick and exactly-one-DMG assertion still see only the universal build, and the
-feed still has one `latest-mac.yml`. The job is `continue-on-error`, because
-build-only artifacts must never hold the universal signing or the Linux
-publishers. Per-arch signing and feeds are a separate, future lane. To get the
-two DMGs from any ref, dispatch `build-desktop.yml` manually with the box
+and `unsigned-build-darwin-x64` beside `unsigned-build-darwin-universal`. The
+job is `continue-on-error`, so a failed single-arch build never holds the
+universal signing or the Linux publishers.
+
+On nightly each single-arch artifact is then signed, notarized and published by
+its own call of `sign-and-notarize.yml` (`mac_variant: arm64 | x64` plus
+`mac_artifact`), which suffixes every shared name with the arch: signing-bucket
+keys, `desktop/<channel>/<version>/KiroCrew-<arch>.{zip,dmg}`, the alias
+`desktop/<channel>/latest/KiroCrew-<arch>.dmg`, and the channel file at
+`feed/<channel>/<arch>/latest-mac.yml`. The universal call passes neither input
+and still excludes the single-arch artifact names when it flattens the run, so
+its keys and `feed/<channel>/latest-mac.yml` are byte-identical to before. A
+single-arch app knows which feed to follow from `desktopDistArch` in its own
+`package.json` (`-c.extraMetadata.desktopDistArch=<arch>`, stamped by the
+script on `TARGET_ARCH` builds only): `auto-update.js` resolves that directory
+as the feed `variant` and offers `KiroCrew-<arch>.dmg` as the reinstall link;
+the universal app carries no stamp and keeps the channel root. `release.yml`
+still calls the universal leg alone — the stable promotion bundle records
+exactly one DMG — so insider/stable per-arch feeds are a later change. To get
+the two DMGs from any ref, dispatch `build-desktop.yml` manually with the box
 ticked, or pick them up from the nightly run.
 
 Prerequisite: **Rosetta 2** on the build machine
