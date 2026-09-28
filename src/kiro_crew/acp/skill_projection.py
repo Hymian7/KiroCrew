@@ -31,6 +31,7 @@ from typing import Any
 from kiro_crew import pinned_fs, platform_compat
 from kiro_crew.acp import session_mcp
 from kiro_crew.agent_discovery import SCOPE_PROJECT, _read_agent_spec, list_agents
+from kiro_crew.agent_files import NO_DEFAULT_RESOURCE_AGENT_NAMES
 from kiro_crew.agent_spec_format import NATIVE_SKILL_ALIAS_PREFIX
 from kiro_crew.atomic_write import atomic_write
 from kiro_crew.config.paths import data_home, kiro_agents_dir, kiro_home, project_agents_dir
@@ -1663,7 +1664,26 @@ def prepare_native_skill_projection(
                     }
 
                 if inherited:
-                    for view in specs.values():
+                    for agent_name, view in specs.items():
+                        # A spec that answers a non-owner is exempt. The three
+                        # resources below are the OWNER's global steering, the
+                        # workspace's steering and its ``AGENTS.md``; appending
+                        # them to a guest view loads the owner's project
+                        # instructions into a turn whose reader is somebody else,
+                        # and a resource is loaded into the prompt rather than
+                        # fetched by a tool call, so the guest tool gate never
+                        # sees it and narrowing ``tools`` does not reach it.
+                        #
+                        # The exemption belongs HERE rather than on the spec: the
+                        # append runs whatever the authored ``resources`` says, so
+                        # an explicit ``[]`` in the guest spec is appended to just
+                        # the same and cannot express this.
+                        #
+                        # This is the whole default set, so an exempt view loads
+                        # none of them in ANY directory -- the fence does not
+                        # depend on where the guest session's cwd points.
+                        if agent_name in NO_DEFAULT_RESOURCE_AGENT_NAMES:
+                            continue
                         for resource in (
                             f"file://{kiro_home().as_posix()}/steering/**/*.md",
                             "file://.kiro/steering/**/*.md",

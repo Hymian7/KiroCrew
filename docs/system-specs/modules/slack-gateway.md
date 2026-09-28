@@ -627,6 +627,7 @@ identity either refuses the turn or operates on the guest's own key:
 | Queue | Both enqueue branches carry `guest_user`, since `_dispatch_queued` rebuilds the turn from the entry alone |
 | Transport path | Refused outright; a guest turn runs native, like review mode |
 | Dashboard mirror | None: `linked_session_key` is `None`, so no slot mirror and no Link-to-Dashboard control |
+| `[OPTIONS]` click | The one re-entry that carries NO `guest_user`: `slack/interactions.py` decodes the asker from the control's token and calls `handle_message` with `asker_key`, and the flag appears nowhere in that module. So `guest_pin_is_refused` declines a pin naming a guest session on a non-guest turn, clearing both `asker_key` and `route_pinned` (dropping the key alone leaves the turn believing it is pinned), and a guest turn mints no token in the first place. Both halves, because the refusal is what covers a control already posted in a channel. The row above is the reason it matters: every protection in this table keys on the FLAG, so an owner landing on the guest's KEY gets the owner's hooks, no tool gate and no `_resolve_guest_execution`, writing into the guest's transcript and store |
 
 **Capability limits — four layers, none of them a sandbox.**
 
@@ -647,6 +648,18 @@ identity either refuses the turn or operates on the guest's own key:
    `mcp_server_name` denies.
 4. `_resolve_approval_mode` never returns `APPROVAL_AUTO` for a guest turn, so an
    active YOLO/SafetyOverride TTL cannot widen it.
+5. The spec is named in `agent_files.NO_DEFAULT_RESOURCE_AGENT_NAMES`, so
+   `acp/skill_projection.prepare_native_skill_projection` skips it when appending
+   kiro-cli's default resources: the owner's global steering
+   (`<kiro home>/steering/**/*.md`), the workspace's `.kiro/steering/**/*.md` and
+   its `AGENTS.md`. This layer is the one the four above cannot reach, and the
+   tripwire for anyone editing them: a resource is loaded INTO the prompt rather
+   than fetched by a tool call, so no `tools` list, hook or approval mode governs
+   it, and a guest would restate the owner's project instructions into a channel a
+   non-owner reads. The exemption keys on the spec NAME inside the projection,
+   because the append runs whatever the authored `resources` says -- an explicit
+   `[]` in the spec is appended to just the same. `kirocrew-guest`, the
+   channel-wide tool-less spec, is in the same set for the same reason.
 
 A guest turn runs as the owner's OS user, so this is a tool-dispatch allowlist and
 not an isolation boundary. `web_fetch` is excluded because a guest-chosen host is a

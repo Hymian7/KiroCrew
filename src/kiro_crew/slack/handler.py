@@ -3241,6 +3241,32 @@ async def maybe_handle_keyword_command(
     return False
 
 
+def guest_pin_is_refused(asker_key: str | None, guest_user: str) -> bool:
+    """Whether an ``[OPTIONS]`` pin naming a guest session must not be honoured.
+
+    True for a pin that names a GUEST session on a turn that is not itself a guest
+    turn. Honouring one runs an OWNER-privileged turn inside the guest's session
+    key: the terminal guest arm in :func:`handle_message` is gated on
+    ``if guest_user``, so the tool gate never runs, ``_turn_hooks`` stays the
+    owner's un-scoped manager instead of ``build_guest_hooks``, and
+    ``_resolve_guest_execution`` is bypassed -- while the turn's tool output is
+    written into the guest's transcript and its store resolves against the guest's
+    bound member store.
+
+    That combination is reachable rather than hypothetical: the whole click path
+    carries no guest identity (``slack/interactions.py`` never mentions
+    ``guest_user``), so every click on a guest turn's control arrives as an owner.
+
+    A named PREDICATE rather than an inline condition because two separate things
+    must agree with it -- the session key and ``route_pinned`` -- and because the
+    rule is worth stating once where a test can reach it.
+
+    ``guest_user`` being set keeps the pin honoured, so a caller that does carry
+    the identity loses nothing.
+    """
+    return bool(asker_key) and is_guest_session_key(str(asker_key)) and not guest_user
+
+
 async def maybe_route_linked_thread(
     text: str,
     session_key: str,
@@ -3432,6 +3458,29 @@ async def handle_message(
     """
     Stats().inc_message_received()
     _t0 = time.monotonic()
+    # A pin naming a GUEST session is refused unless this turn is itself a guest
+    # turn. The pin arrives from an ``[OPTIONS]`` click, and the whole click path
+    # carries no ``guest_user`` -- ``slack/interactions.py`` never mentions it --
+    # so honouring such a pin runs an OWNER-privileged turn inside the guest's
+    # session key: the terminal guest arm below is gated on ``if guest_user``, so
+    # the tool gate never runs, ``_turn_hooks`` is the owner's un-scoped manager
+    # instead of ``build_guest_hooks``, and ``_resolve_guest_execution`` is
+    # bypassed -- while the tool output is written into the guest's transcript and
+    # the store resolves against the guest's bound member store.
+    #
+    # Refused HERE, before any consumer, so ``session_key`` and ``route_pinned``
+    # cannot disagree about it: dropping the key alone would leave the turn
+    # believing it is pinned. ``not guest_user`` keeps the pin working for a caller
+    # that does carry the identity, so this narrows nothing a guest turn needs.
+    #
+    # The twin of the mint-site skip further down: this half is what covers a
+    # control ALREADY posted in a channel, whose token stays clickable.
+    if guest_pin_is_refused(asker_key, guest_user):
+        logger.warning(
+            "Ignoring an OPTIONS pin naming a guest session on a non-guest turn",
+        )
+        asker_key = None
+        route_pinned = False
     # reply_ts is the true Slack thread timestamp (used for posting replies and
     # as the key of thread-indexed maps like SessionMap._thread_to_session and
     # dashboard _slack_to_slot). session_key is the namespaced form used for
@@ -6113,13 +6162,22 @@ async def handle_message(
         # current and be accepted. Minting from our own row also means no I/O and no
         # await here at all. No row (restricted session, or no log) means no provable
         # position, so the control posts untokened and its clicks are honoured.
+        #
+        # A GUEST turn mints nothing. The pin's whole purpose is to re-enter the
+        # asking conversation, and no click can re-enter this one as a guest: the
+        # click path carries no ``guest_user``. So the only turn such a token could
+        # ever pin is an owner turn landing inside the guest's session key, which
+        # the refusal at the top of this function declines to honour -- minting it
+        # would be minting a credential that is always refused. Untokened is the
+        # shape this site already defines for "no provable position": the control
+        # still posts, and its click resolves by the ordinary thread rule.
         _options_token = (
             mint_options_token(
                 cast("DashboardState | None", _dashboard_state),
                 session_key,
                 _turn_row_ts,
             )
-            if options and _turn_row_ts
+            if options and _turn_row_ts and not guest_user
             else None
         )
         footer_blocks = _append_footer_actions(

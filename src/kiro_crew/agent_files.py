@@ -54,6 +54,32 @@ SLACK_GUEST_AGENT_FILENAME = "kirocrew-slack-guest.json"
 #: guest member bound to any other spec, so a drift between the two names would
 #: refuse every guest turn while both strings still looked right.
 SLACK_GUEST_AGENT_NAME = SLACK_GUEST_AGENT_FILENAME.removesuffix(".json")
+#: The ``kirocrew-guest`` modeId, derived for the same reason as the line above.
+GUEST_AGENT_NAME = GUEST_AGENT_FILENAME.removesuffix(".json")
+
+#: The specs that answer somebody who is NOT the owner, and therefore must never
+#: inherit kiro-cli's default resources.
+#:
+#: Those defaults are the OWNER's global steering
+#: (``<kiro home>/steering/**/*.md``), the workspace's steering
+#: (``.kiro/steering/**/*.md``) and its ``AGENTS.md``
+#: (``acp/skill_projection.prepare_native_skill_projection``). They are appended
+#: to every projected view, so without an exemption here a guest turn loads the
+#: owner's project instructions and can restate them into a channel a non-owner
+#: reads. Narrowing ``tools`` does not help: a resource is loaded into the
+#: prompt, not fetched by a tool call, so it never reaches the guest tool gate.
+#:
+#: The rule is about WHO is answered, not about which channel asked, so both
+#: guest specs are named: ``kirocrew-guest`` is the tool-less boundary every
+#: messaging channel drives a non-operator sender on
+#: (``messaging.dispatch.TOOLLESS_TURN_AGENT``), and ``kirocrew-slack-guest`` is
+#: the allow-listed Slack guest's own member spec. An agent an OWNER runs as is
+#: absent by design: steering is the owner's own instruction to their own agent.
+#:
+#: Membership is by spec NAME because that is what the projection keys its views
+#: by, and both names are derived from their filenames above, so a rename cannot
+#: leave this set quietly matching nothing.
+NO_DEFAULT_RESOURCE_AGENT_NAMES = frozenset({GUEST_AGENT_NAME, SLACK_GUEST_AGENT_NAME})
 
 # Collective allowlists — the EXACT filenames KiroCrew owns in each dir. Used by
 # the Playwright convergence sweep (browser/setup.py) so it rewrites only files

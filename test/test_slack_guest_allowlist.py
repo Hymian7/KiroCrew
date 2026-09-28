@@ -43,6 +43,7 @@ from kiro_crew.slack.handler import (
     GUEST_MEMBER_DEFECT_STORE_OWNER,
     guest_member_configured,
     guest_member_defect,
+    guest_pin_is_refused,
     guest_session_key,
     is_allowed_user,
     is_guest_session_key,
@@ -1130,6 +1131,77 @@ class TestGuestTurnThreadsItsFlagEverywhere:
         }
         missing = params - forwarded - exempt
         assert not missing, f"compaction replay drops: {sorted(missing)}"
+
+
+class TestAnOptionsPinNeverCarriesAnOwnerIntoAGuestSession:
+    """An ``[OPTIONS]`` click is the one re-entry that carries no guest identity.
+
+    ``slack/interactions.py`` decodes the asker from the control's token and
+    re-enters ``handle_message`` with it, and the guest flag appears nowhere on that
+    path. So a control posted by a guest turn is clicked as an OWNER while naming
+    the guest's session key -- and every guest protection in the turn loop is gated
+    on the flag, not on the key.
+
+    Two halves, deliberately not one: the refusal covers a control already sitting
+    in a channel, and the mint skip stops making more of them.
+    """
+
+    def test_a_guest_pin_on_an_owner_turn_is_refused(self):
+        assert guest_pin_is_refused(guest_session_key(GUEST, "5.0"), "") is True
+
+    def test_a_guest_pin_on_that_guests_own_turn_is_honoured(self):
+        """The identity is present, so every protection runs; nothing to refuse."""
+        assert guest_pin_is_refused(guest_session_key(GUEST, "5.0"), GUEST) is False
+
+    def test_an_owner_pin_is_honoured(self):
+        """The CONTROL: the refusal must not swallow the ordinary pin.
+
+        Without this, deleting the key check entirely -- refusing every pin -- would
+        still pass the case above, and the pin exists to survive a handover.
+        """
+        from kiro_crew.messaging.link import canonical_key
+
+        assert guest_pin_is_refused(canonical_key("5.0"), "") is False
+
+    def test_no_pin_at_all_is_not_a_refusal(self):
+        assert guest_pin_is_refused(None, "") is False
+        assert guest_pin_is_refused("", "") is False
+
+    def test_the_refusal_clears_the_pin_flag_too(self):
+        """Structural, because the two must agree.
+
+        Dropping ``asker_key`` alone leaves the turn believing it is pinned:
+        ``route_pinned`` gates the linked-thread reroute and the owner-key reads
+        independently of the key itself. Needles built from parts so this assertion
+        cannot match its own line.
+        """
+        import inspect
+
+        from kiro_crew.slack import handler as _handler
+
+        src = inspect.getsource(_handler.handle_message)
+        head = src[: src.index("reply_ts = thread_ts or msg_ts")]
+        assert "guest_pin_is" + "_refused(" in head
+        assert "asker_key = " + "None" in head
+        assert "route_pinned = " + "False" in head
+
+    def test_a_guest_turn_mints_no_options_token(self):
+        """Structural: the mint call must be gated on the guest flag.
+
+        A behavioural reach would need the whole streaming turn; the condition is
+        one clause at one call site, so it is pinned where it is written. Needles
+        built from parts so this assertion cannot match its own line.
+        """
+        import inspect
+
+        from kiro_crew.slack import handler as _handler
+
+        src = inspect.getsource(_handler.handle_message)
+        mint = src.index("mint_options" + "_token(")
+        gate = src.index("not " + "guest_user", mint)
+        # The clause belongs to THIS call's own conditional expression, so it is
+        # read before the next statement rather than somewhere later in the turn.
+        assert gate - mint < 400, gate - mint
 
 
 # ───────────── end to end, through a REAL session index ───────────────────────

@@ -22,6 +22,7 @@ import pytest
 
 from conftest import requires_symlinks
 from kiro_crew.acp import skill_projection as projection
+from kiro_crew.agent_files import NO_DEFAULT_RESOURCE_AGENT_NAMES
 from kiro_crew.agent_spec_format import iter_agent_spec_files
 from kiro_crew.hooks import FileTooLargeError
 
@@ -480,6 +481,52 @@ def test_only_literal_true_suppresses_inherited_instruction_files(native_tree, v
     resources = prepared.specs["custom"]["resources"]
     assert any("AGENTS.md" in item for item in resources) is (value is not True)
     assert any("steering" in item for item in resources) is (value is not True)
+
+
+@pytest.mark.parametrize("guest", sorted(NO_DEFAULT_RESOURCE_AGENT_NAMES))
+def test_a_guest_spec_never_inherits_the_owners_instruction_files(native_tree, monkeypatch, guest):
+    """A spec that answers a non-owner loads none of the owner's instructions.
+
+    The default resources are the owner's GLOBAL steering, the workspace's
+    steering and its ``AGENTS.md``. A guest turn that inherits them can restate
+    the owner's project instructions into a channel a non-owner reads, and
+    narrowing ``tools`` cannot reach it: a resource arrives in the prompt rather
+    than through a tool call, so the guest tool gate never sees it.
+
+    ``custom`` is the CONTROL and is load-bearing. Inheritance is left at its
+    default here, so without a control asserting the append actually happened,
+    an empty guest list would also be what a projection that injected nothing at
+    all produces -- and this test would pass on a fence that does nothing.
+    """
+    home, agents, project = native_tree
+    (agents / "custom.json").write_text('{"name":"custom"}', encoding="utf-8")
+    (agents / f"{guest}.json").write_text(
+        json.dumps({"name": guest, "tools": []}), encoding="utf-8"
+    )
+    # ``native_tree`` pins enumeration to ``custom`` alone, so the guest spec is
+    # only projected once it is named here too.
+    monkeypatch.setattr(
+        projection,
+        "list_agents",
+        lambda **kw: [
+            SimpleNamespace(name="custom", filename="custom.json", scope="global"),
+            SimpleNamespace(name=guest, filename=f"{guest}.json", scope="global"),
+        ],
+    )
+
+    prepared = projection.prepare_native_skill_projection(project)
+
+    control = prepared.specs["custom"]["resources"]
+    assert any("AGENTS.md" in item for item in control), control
+    assert any("steering" in item for item in control), control
+
+    resources = prepared.specs[guest]["resources"]
+    assert not any("AGENTS.md" in item for item in resources), resources
+    assert not any("steering" in item for item in resources), resources
+    # Named separately from the glob check above: this is the OWNER's own
+    # steering tree by absolute path, the one entry a guest-only working
+    # directory could never fence, so it gets its own assertion.
+    assert f"file://{home.as_posix()}/steering/**/*.md" not in resources, resources
 
 
 @pytest.mark.parametrize("value", ["false", 1, False, True])
