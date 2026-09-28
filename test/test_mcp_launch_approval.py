@@ -2150,3 +2150,209 @@ async def test_re_approving_a_running_server_keeps_its_declared_env_forwarded(
     assert (
         gatewayd._declared_env_pairs(key, identity_keys) == declared
     ), "the next cold spawn after the toggle would start the backend without its declared env"
+
+
+def _approve_as_the_toggle_does(tmp_path: Path, mod, store: Path) -> None:
+    """Resolve what ``srv`` runs now and approve exactly that, as the MCP page does."""
+    probe = mod.LaunchApprovals(probe=True)
+    _rewrite(tmp_path, frozenset({"srv"}), probe)
+    launches = list(probe.captured_launches.get("SRV", {}).values())
+    assert launches, "the probe pass resolved no launch for srv"
+    mod.approve({"srv": launches}, path=store)
+
+
+def _rewrite_and_persist(tmp_path: Path, mod, store: Path):
+    """One gateway-start pass against the stored approvals, persisted after."""
+    approvals = mod.load_approvals(store)
+    target_env = _rewrite(tmp_path, frozenset({"srv"}), approvals)
+    mod.save_pass(approvals, path=store)
+    return approvals, target_env
+
+
+def _placeholder_agent(tmp_path: Path, value_ref: str = "${KC_TEST_TOKEN}") -> None:
+    _write_agent(
+        tmp_path / "agents",
+        {"srv": {"command": _APPROVED_CMD, "args": ["-V"], "env": {"TOKEN": value_ref}}},
+    )
+
+
+def test_a_changed_placeholder_value_keeps_the_approval(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "first")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    monkeypatch.setenv("KC_TEST_TOKEN", "rotated")
+    approvals, target_env = _rewrite_and_persist(tmp_path, mod, store)
+
+    assert approvals.refused == {}
+    assert _targets_running(target_env, _APPROVED_CMD)
+    stored = mod.load_approvals(store)
+    command_hash = rewriter.hash_command(_APPROVED_CMD, ["-V"])
+    rotated = mod.env_fingerprint({"TOKEN": "rotated"})
+    first = mod.env_fingerprint({"TOKEN": "first"})
+    # gatewayd checks the pair the store holds, so the new expansion must be there
+    # and the one it replaced must not linger.
+    assert stored.admits_launch("SRV", command_hash, rotated)
+    assert not stored.admits_launch("SRV", command_hash, first)
+    assert stored.stored_refused == {}
+    # The "Approved before" view keeps a readable display of the live pair.
+    displays = stored.approved_displays.get("SRV", {})
+    assert mod.launch_pair(command_hash, rotated) in displays
+    assert "TOKEN=${KC_TEST_TOKEN}" in displays[mod.launch_pair(command_hash, rotated)][1]
+
+
+def test_a_rebind_is_audited_as_an_approved_launch_not_a_managed_one(tmp_path, monkeypatch, caplog):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "first")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    monkeypatch.setenv("KC_TEST_TOKEN", "rotated")
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        _rewrite_and_persist(tmp_path, mod, store)
+
+    audit = [r.getMessage() for r in caplog.records if "recorded" in r.getMessage()]
+    assert audit, "the save wrote the rebound pair without an audit line"
+    # The operator approved this declaration; calling it managed states the
+    # opposite provenance of what was admitted.
+    assert not any("managed launch" in line for line in audit), audit
+    assert any("${VAR} value changed" in line for line in audit), audit
+
+
+def test_a_changed_declared_env_text_is_still_refused(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "first")
+    monkeypatch.setenv("KC_OTHER", "first")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    # Same expansion, different declared text: the agent-writable part moved.
+    _placeholder_agent(tmp_path, "${KC_OTHER}")
+    approvals, target_env = _rewrite_and_persist(tmp_path, mod, store)
+
+    assert approvals.refused == {"SRV": mod.REFUSED_CHANGED}
+    assert not _targets_running(target_env, _APPROVED_CMD)
+
+
+def test_a_changed_command_with_a_placeholder_is_still_refused(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "first")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    monkeypatch.setenv("KC_TEST_TOKEN", "rotated")
+    _write_agent(
+        tmp_path / "agents",
+        {
+            "srv": {
+                "command": _ATTACK_CMD,
+                "args": ["-c", "id"],
+                "env": {"TOKEN": "${KC_TEST_TOKEN}"},
+            }
+        },
+    )
+    approvals, target_env = _rewrite_and_persist(tmp_path, mod, store)
+
+    assert approvals.refused == {"SRV": mod.REFUSED_CHANGED}
+    assert _targets_running(target_env, _ATTACK_CMD) == []
+
+
+def test_repeated_placeholder_changes_never_reach_the_launch_cap(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "v0")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    for i in range(1, getattr(mod, "_MAX_SERVER_LAUNCHES") + 5):
+        monkeypatch.setenv("KC_TEST_TOKEN", f"v{i}")
+        approvals, _target_env = _rewrite_and_persist(tmp_path, mod, store)
+        assert approvals.refused == {}, f"refused after {i} changes"
+
+    assert len(mod.load_approvals(store).approved_pairs["SRV"]) == 1
+
+
+def test_a_rebind_does_not_restore_an_approval_revoked_during_the_pass(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "first")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    monkeypatch.setenv("KC_TEST_TOKEN", "rotated")
+    approvals = mod.load_approvals(store)
+    _rewrite(tmp_path, frozenset({"srv"}), approvals)
+    # The operator turns the stub off before the pass is persisted.
+    mod.revoke(["srv"], path=store)
+    mod.save_pass(approvals, path=store)
+
+    stored = mod.load_approvals(store)
+    command_hash = rewriter.hash_command(_APPROVED_CMD, ["-V"])
+    assert not stored.approved.get("SRV")
+    assert not stored.admits_launch("SRV", command_hash, mod.env_fingerprint({"TOKEN": "rotated"}))
+
+
+def test_a_rebind_does_not_overwrite_an_approval_made_during_the_pass(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "v0")
+    _placeholder_agent(tmp_path)
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    monkeypatch.setenv("KC_TEST_TOKEN", "v1")
+    approvals = mod.load_approvals(store)
+    _rewrite(tmp_path, frozenset({"srv"}), approvals)
+    # The value moves again and the operator approves it before the pass is saved.
+    monkeypatch.setenv("KC_TEST_TOKEN", "v2")
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+    mod.save_pass(approvals, path=store)
+
+    stored = mod.load_approvals(store)
+    command_hash = rewriter.hash_command(_APPROVED_CMD, ["-V"])
+    assert stored.admits_launch("SRV", command_hash, mod.env_fingerprint({"TOKEN": "v2"}))
+    assert not stored.admits_launch("SRV", command_hash, mod.env_fingerprint({"TOKEN": "v1"}))
+    assert not stored.admits_launch("SRV", command_hash, mod.env_fingerprint({"TOKEN": "v0"}))
+
+
+def test_two_declarations_of_one_launch_never_reach_the_launch_cap(tmp_path, monkeypatch):
+    mod = _approval_module()
+    assert mod is not None
+    store = tmp_path / "approvals.json"
+    monkeypatch.setenv("KC_TEST_TOKEN", "v0")
+    _placeholder_agent(tmp_path)
+    # A second agent declares the same command and args with other env text.
+    (tmp_path / "agents" / "b.json").write_text(
+        json.dumps(
+            {
+                "name": "b",
+                "mcpServers": {
+                    "srv": {
+                        "command": _APPROVED_CMD,
+                        "args": ["-V"],
+                        "env": {"TOKEN": "${KC_TEST_TOKEN}", "LEVEL": "debug"},
+                    }
+                },
+            }
+        )
+    )
+    _approve_as_the_toggle_does(tmp_path, mod, store)
+
+    for i in range(1, getattr(mod, "_MAX_SERVER_LAUNCHES") + 5):
+        monkeypatch.setenv("KC_TEST_TOKEN", f"v{i}")
+        approvals, _target_env = _rewrite_and_persist(tmp_path, mod, store)
+        assert approvals.refused == {}, f"refused after {i} changes"
+
+    assert len(mod.load_approvals(store).approved_pairs["SRV"]) == 2

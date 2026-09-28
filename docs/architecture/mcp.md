@@ -702,6 +702,12 @@ A stub roster entry selects routing, while
 command and arguments together with the derived effective-environment hash that
 gatewayd may run outside a session sandbox. Command and environment hashes are
 stored and checked as one pair, so values from two approvals cannot be combined.
+The approved fingerprint hashes the declared environment with its `${VAR}`
+references unexpanded. When that declared launch is approved and only an
+expansion changed, the rewrite pass records the new pair itself and drops the
+older expansion of the same launch: the values come from the gateway
+environment (the operator's shell and the crew `.env`), which no agent can
+write. A changed command, argument or declared env text is still refused.
 An absent or empty store approves nothing. A stub
 without a matching fingerprint stays on the session's unpooled, sandboxed launch
 path. A queued cold spawn reloads the store after admission and resolves the same

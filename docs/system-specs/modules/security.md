@@ -24,7 +24,9 @@ Kiro Crew implements defense-in-depth security across multiple layers: OS-level 
 ### MCP launch authorization leaves
 
 The `approvals.json` file in the crew-home `mcp-launch-approvals/` directory
-records operator-approved fingerprints for stubbed MCP launches. Every writer publishes it by rename, so
+records operator-approved fingerprints for stubbed MCP launches. A fingerprint
+covers the declared environment text, so a changed `${VAR}` value keeps an
+approved launch approved, while a changed declared text does not. Every writer publishes it by rename, so
 the seal is its DIRECTORY: the file-tool gate denies writes under
 `mcp-launch-approvals/`, and the OS sandbox mounts that precreated directory
 read-only with a strict no-symlink check. Empty and absent forms both approve
