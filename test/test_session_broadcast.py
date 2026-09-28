@@ -582,9 +582,13 @@ class TestATargetThatNeverAnswers:
         """The target gate already allowed this send before its delivery stalls.
 
         `wait_for` turns the inner cancellation into `TimeoutError` for the
-        broadcast, but the authorized send itself receives `CancelledError` and
-        must audit that distinct, unknowable outcome before re-raising. The
-        re-raise is pinned by both the timeout row and the following target.
+        broadcast, and the AWAITING frame receives `CancelledError` and must audit
+        that distinct, unknowable outcome before re-raising. The re-raise is pinned
+        by both the timeout row and the following target.
+
+        The delivery coroutine itself is shielded and therefore sees no
+        cancellation -- interrupting it strands the steer bookkeeping permanently,
+        which `TestTheShieldedSteerDelivery` pins.
         """
         from kiro_crew.dashboard.chat_delivery import STEER_STEERED
 
@@ -617,7 +621,10 @@ class TestATargetThatNeverAnswers:
             mode="steer",
         )
 
-        assert inner_exceptions == [asyncio.CancelledError]
+        # The shield absorbed it: the delivery was never interrupted, while the
+        # awaiting frame still audited the unknown outcome below.
+        assert inner_exceptions == []
+        never.set()
         cancelled = [
             row for row in audits if row["operation"] == "send" and row["slot_key"] == "chat-3"
         ]
@@ -890,6 +897,136 @@ class TestATargetThatNeverAnswers:
             "a second private literal reappeared in the MCP client; two literals "
             "bounding one population is the drift this name exists to prevent"
         )
+
+
+class TestTheShieldedSteerDelivery:
+    """The per-target bound must not interrupt a steer already in the pipe.
+
+    `steer_into_running_turn` writes six per-text maps and `_pending_steers`
+    BEFORE its RPC and pops them in one reconciliation tail AFTER it, guarding the
+    RPC with `except Exception` -- which does not catch `CancelledError`. So a bare
+    `await` under the budget unwinds through the RPC and skips that tail, while the
+    bytes may already have reached kiro-cli. Nothing else pops those maps
+    (`_settle_consumed_steers` clears only the attachment and decision-strip maps;
+    `_requeue_unconsumed_steers` returns early once settling emptied
+    `_pending_steers`), so the surviving `_steer_delivery_ids` entry refuses that
+    exact text on that slot forever and `retained_steer_count` never falls back.
+
+    Driven through the REAL `steer_into_running_turn` with a client whose `steer`
+    hangs, because the defect IS that `except Exception` gap -- a patched delivery
+    would not exercise it.
+    """
+
+    @staticmethod
+    def _target_with_hanging_steer(state, caller, name="chat-2"):
+        """A busy child of *caller* whose steer RPC never returns, and its gate."""
+        slot = _busy(_child(state, name, caller))
+        release = asyncio.Event()
+        client = MagicMock()
+        client.supports_steer = True
+
+        async def _steer(_message):
+            await release.wait()
+            return True
+
+        client.steer = _steer
+        slot._acp_client = client
+        return slot, release
+
+    @pytest.mark.asyncio
+    async def test_a_budget_cancel_does_not_strand_the_steer_bookkeeping(
+        self, tmp_path, monkeypatch
+    ):
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        caller = _slot(state, "chat-1")
+        target, release = self._target_with_hanging_steer(state, caller)
+        monkeypatch.setattr(sc, "BROADCAST_TARGET_ALLOWANCE_SECS", 0.05)
+
+        out = await sc.broadcast_to_targets(
+            state,
+            caller_session_key=_key(caller),
+            message="stop, the issue was already fixed",
+            mode="steer",
+        )
+
+        # The broadcast reported on schedule rather than waiting for the wedged RPC.
+        assert [row["code"] for row in out["results"]] == ["delivery_timeout"]
+        # And the delivery is still alive, holding its own bookkeeping, instead of
+        # having been unwound mid-RPC.
+        assert target._steer_delivery_ids, (
+            "the delivery was interrupted before its reconciliation tail; its "
+            "per-text maps are now stranded on the slot"
+        )
+        orphans = [task for task in sc._ORPHANED_STEER_DELIVERIES if not task.done()]
+        assert len(orphans) == 1, "the shielded delivery was not retained"
+
+        # Let the wedged RPC finish: the shielded delivery reconciles ITSELF.
+        release.set()
+        await asyncio.wait_for(orphans[0], timeout=5)
+
+        assert target._steer_delivery_ids == {}, (
+            "the delivery finished without popping `_steer_delivery_ids`, so this "
+            "text is refused on this slot forever"
+        )
+        assert target._steer_send_ids == {}
+        assert target._steer_user_origin == {}
+        assert target._steer_admissions == {}
+        # `_pending_steers` is NOT asserted empty: the steered tail deliberately
+        # leaves it for the turn, whose `steering_consumed` echo settles it and
+        # whose teardown otherwise degrades it to a visible queue card. Popping it
+        # here would delete a steer the turn may never confirm.
+        assert (
+            target._pending_steers.count(
+                sc._SEND_PROVENANCE.format(caller=caller.key, via=sc.BROADCAST_VIA)
+                + "stop, the issue was already fixed"
+            )
+            == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_same_text_can_be_steered_again_after_a_budget_cancel(
+        self, tmp_path, monkeypatch
+    ):
+        """The user-visible consequence of the strand, pinned end to end.
+
+        The turn settles the steer first, which is the step that exposes the
+        difference: settling pops `_pending_steers` and nothing else, so only the
+        delivery's own tail can clear `_steer_delivery_ids`. Stranded, that entry
+        answers `STEER_UNAVAILABLE` for this exact text on every later attempt --
+        the caller's retry silently becomes a queue card forever.
+        """
+        from kiro_crew.dashboard.chat_delivery import (
+            STEER_STEERED,
+            steer_into_running_turn,
+        )
+        from kiro_crew.dashboard.chat_runner import _settle_consumed_steers
+
+        state = _make_state(tmp_path)
+        state.broadcast_ws = MagicMock()
+        caller = _slot(state, "chat-1")
+        target, release = self._target_with_hanging_steer(state, caller)
+        monkeypatch.setattr(sc, "BROADCAST_TARGET_ALLOWANCE_SECS", 0.05)
+        text = "stop, the issue was already fixed"
+
+        await sc.broadcast_to_targets(
+            state,
+            caller_session_key=_key(caller),
+            message=text,
+            mode="steer",
+        )
+        release.set()
+        for task in list(sc._ORPHANED_STEER_DELIVERIES):
+            await asyncio.wait_for(task, timeout=5)
+
+        # The turn confirms consumption, exactly as kiro-cli's echo does.
+        prompt = sc._SEND_PROVENANCE.format(caller=caller.key, via=sc.BROADCAST_VIA) + text
+        _settle_consumed_steers(target, f"<user_message>\n{prompt}\n</user_message>", state)
+        assert target._pending_steers == []
+
+        # A fresh steer of the SAME provenance-wrapped text is accepted, not
+        # refused by a guard reading a leftover entry.
+        assert await steer_into_running_turn(state, target, prompt) == STEER_STEERED
 
 
 # ── The caller gate ──────────────────────────────────────────────────────────
