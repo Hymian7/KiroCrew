@@ -197,6 +197,9 @@ def _precreate_one(meeting_id: str, title: str, root: Any) -> bool:
     """
     if store.read_meeting_meta(meeting_id, root) is not None:
         return False
+    # Calendar data enters a meeting as its title only. Attachments are owner
+    # data rendered outside the agent's untrusted-data fence, so an event's
+    # attachments must never be mapped into meeting metadata here.
     meeting_lifecycle.init_meeting_blocking(meeting_id, title, {}, root)
     return True
 

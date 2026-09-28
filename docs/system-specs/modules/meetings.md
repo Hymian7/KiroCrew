@@ -220,18 +220,27 @@ so an agent gets a paragraph of context rather than one interruption per
 utterance. Three consecutive dispatch failures trip a circuit breaker (backoff
 60s → 120s → stop); `POST …/reset` resumes.
 
-Each agent's first message carries the meeting context (title, description,
-attendees, attachments) from `build_meeting_context` inside a
+Each agent's first message carries the meeting context from
+`build_meeting_context`. The calendar and meeting metadata (title, description,
+attendees) and the "Attached documents:" list all sit inside a
 `<<<UNTRUSTED_CALENDAR_EVENT … >>>END_UNTRUSTED_CALENDAR_EVENT` fence with a
-line telling the model the block is data, never instructions. Each field is
-redacted, then screened with `contains_injection`: a match is replaced by
-`[withheld: failed content screening]` and recorded with
-`audit_injection_dropped`, and a withheld attachment path loses its "read the
-file at" instruction. Other fields pass through `neutralize_untrusted_text`,
-which scrubs every untrusted fence marker and the primary prompt boundary
-markers, so no field can close the fence around it. Transcript batches sent
-later by `dispatch_to_agent` are the meeting's working input and are not
-wrapped in this fence.
+line telling the model the block is data, never instructions. When documents
+are attached, one fixed line after the fence close tells the agent to read
+them, so no attachment text is placed where the model acts on it. Every field
+is redacted, then screened with `contains_injection`. A title may name the
+system prompt as a meeting topic: a title that as a whole matches the topic
+grammar (an optional short qualifier such as "Q3" or "Retro on", the phrase, a
+recognised topic noun, an optional second noun and a short parenthetical, as in
+"System prompt design review") is admitted. Any other field is screened as
+written, so a topic phrase with anything else attached is withheld, and every
+other pattern (including `<system>` tags and "ignore prior instructions")
+applies. A match is replaced by `[withheld: failed content screening]` and
+recorded with `audit_injection_dropped` under `meetings_calendar_<field>`.
+Calendar pre-creation writes an empty attachment list, and a test pins that.
+Other fields pass through `neutralize_untrusted_text`, which scrubs every
+untrusted fence marker and the primary prompt boundary markers, so no field can
+close or forge the fence. Transcript batches sent later by `dispatch_to_agent`
+are the meeting's working input and are not wrapped in this fence.
 
 `POST …/dispatch` first redacts and appends the finalized line to
 `transcript.jsonl`, then fans it out to the queues. The response carries the same
