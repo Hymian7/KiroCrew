@@ -121,6 +121,11 @@ def wired(monkeypatch):
     monkeypatch.setattr(backend_mod, "build_backend_env", lambda settings: {})
     monkeypatch.setattr(backend_mod, "seed_model_identity", lambda settings, **kw: True)
     monkeypatch.setattr(backend_mod, "require_model_identity", lambda settings: None)
+    # The kiro-cli login-check row shells out to create a store; it has its own
+    # tests, and the ORDERING tests here neutralise it like the rest. Silent on
+    # purpose: the happy-path assertion below pins the whole startup list, and this
+    # seam's ordering is pinned by a dedicated test rather than by widening that.
+    monkeypatch.setattr(entry.kiro_login_mod, "seed_kiro_cli_login", lambda **kw: None)
     monkeypatch.setattr(entry, "verify_sandbox", lambda settings, **kw: None)
     monkeypatch.setattr(entry.bundle_mod, "install_bundle", lambda settings, **kw: None)
     return events
@@ -459,3 +464,35 @@ def test_no_bucket_still_boots(wired, tmp_path):
     entry.run(make_settings(tmp_path, bucket=None), wait_for_shutdown=lambda c: "signal")
     assert "start_backend" in wired
     assert "start_front" in wired
+
+
+# --- run() seeds kiro-cli's own login store before the backend ------------
+
+
+def test_run_seeds_the_kiro_cli_login_store_before_the_backend(wired, tmp_path, monkeypatch):
+    """The copy must exist before anything could spawn ``kiro-cli acp``.
+
+    ``kiro-cli`` validates its own credential store ahead of the ACP handshake, so
+    a copy written after the backend is serving would leave the first turns of the
+    task refusing with the same 503 the vault seed already looks like it fixed.
+    """
+
+    def recording_seed(**kw):
+        wired.append("seed_kiro_cli_login")
+
+    monkeypatch.setattr(entry.kiro_login_mod, "seed_kiro_cli_login", recording_seed)
+    entry.run(make_settings(tmp_path), wait_for_shutdown=lambda c: "signal")
+    assert "seed_kiro_cli_login" in wired
+    assert wired.index("seed_kiro_cli_login") < wired.index("start_backend")
+
+
+def test_run_refuses_when_the_kiro_cli_login_store_cannot_be_written(wired, tmp_path, monkeypatch):
+    """Fail closed: never a silent fall-through to the 503 this seed removes."""
+
+    def refusing_seed(**kw):
+        raise ConfigError("kiro-cli login store is unwritable")
+
+    monkeypatch.setattr(entry.kiro_login_mod, "seed_kiro_cli_login", refusing_seed)
+    with pytest.raises(ConfigError, match="kiro-cli login store"):
+        entry.run(make_settings(tmp_path), wait_for_shutdown=lambda c: "signal")
+    assert "start_backend" not in wired
