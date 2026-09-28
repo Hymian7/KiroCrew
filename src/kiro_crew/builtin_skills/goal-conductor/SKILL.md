@@ -25,9 +25,10 @@ all** — not `fs_write`, and not `code` either, which governance classes as a
 filesystem write because it writes files and can shell out. `grep`, `glob` and
 `web_search` are unmounted as well; `fs_read` and `web_fetch` are what you read
 the world with. That is deliberate. If a task needs a file written, it is a work
-item, not something you do. `execute_bash` IS granted, for exactly one purpose:
+item, not something you do. `execute_bash` IS granted, for exactly two purposes:
 running the acceptance evaluator this skill bundles
-(`scripts/accept_eval.py`). It is deliberately kept out of `allowedTools`, so
+(`scripts/accept_eval.py`) and its patrol budget script
+(`scripts/patrol_budget.py`). It is deliberately kept out of `allowedTools`, so
 every call prompts for approval — see "Known limits" for what that costs per
 patrol cycle.
 
@@ -207,10 +208,46 @@ pass the agent name to `session_create` yourself.
 
 After dispatching, arm a loop on your own session with `monitor_start`. Put the
 check AND the exit condition in the message and pass explicit positive
-`max_cycles` and `max_runtime_secs` from the operator's round/time budget. When
-no tighter budget exists, use 240 cycles and 86,400 seconds. If live work needs a
-larger bound, re-arm it with `monitor_update`; `monitor_start` is create-only.
-Then end your turn.
+`interval_secs`, `max_cycles` and `max_runtime_secs`. Take the runtime from the
+operator's time budget, or 86,400 seconds when none is set. **The bounds come
+from the script, not from you:**
+
+```bash
+python3 <this skill's dir>/scripts/patrol_budget.py check \
+  --interval-secs <I> --max-cycles <C> --max-runtime-secs <R>
+```
+
+Exit 0 means arm with those numbers. Exit 20 means arm with the `suggest` block
+it prints instead: a long interval with few cycles ends the loop hours before
+its runtime, while work is still live, and an interval longer than 10% of the
+runtime lets the loop expire without one cycle in the renewal window. Run the same check
+before any `monitor_update` that changes a bound. Record the bounds you armed
+with as `patrol_base` (`cycles=<C> runtime=<R>`) in your own session ledger's
+artifacts: renewal reads it back.
+
+**Renew the loop yourself, before it runs out.** A capped loop's nudge carries a
+second line, `[patrol budget: cycle N/M, Xs/Rs runtime left]`. Once the cap is
+spent the loop deactivates and you never get the turn you would renew in. When
+10% or less of either budget is left the line ends `; 10% or less left`. On that cycle,
+and only then (the script prompts for approval like any shell call), pass the
+line verbatim. The 10% margin is the time a person has to approve that prompt;
+if nobody does, the loop ends at its cap as it would have without renewal.
+
+```bash
+python3 <this skill's dir>/scripts/patrol_budget.py renew \
+  --line '<the [patrol budget: ...] line>' \
+  --base-cycles <C> --base-runtime-secs <R> --open-items <items not terminal>
+```
+
+| exit | what you do |
+|---|---|
+| 0 | call `monitor_update` with its `monitor_update` numbers, then carry on. If `monitor_update` refuses the new bounds (an operator runtime ceiling below 7 days), treat it as exit 30 |
+| 10 | nothing; more than 10% is left |
+| 20 | nothing to renew for; the stop conditions below decide |
+| 30 | the renewal cap is spent (3 renewals, or one more full base budget would pass 1000 cycles or 7 days; those two ceilings come from the budget line alone, so they hold even if `patrol_base` is lost): stop under condition 3 and ask the user for another budget |
+
+`monitor_start` is create-only, so every change after arming is a
+`monitor_update`. Then end your turn.
 
 Each cycle:
 
@@ -317,8 +354,8 @@ Each cycle:
 6. **Say nothing unless there is a real signal.** An item passing acceptance,
    failing it, asking a question, or stalling. Never post "nothing changed".
 
-**Shell exists for the evaluator, not for work.** `execute_bash` is granted
-so patrol can run `accept_eval.py`. Running a work item's build, test, or fix
+**Shell exists for the two bundled scripts, not for work.** `execute_bash` is
+granted so patrol can run `accept_eval.py` and `patrol_budget.py`. Running a work item's build, test, or fix
 yourself through it is the boundary violation this skill exists to prevent — if
 you need a command run to MAKE something true, that is a work item; the evaluator
 only CHECKS what is already true.
@@ -509,7 +546,9 @@ what the composer renders:
   archives rather than deletes — so budget one approval per child you close out.
   `execute_bash` also still prompts, so **each patrol cycle that verifies
   anything blocks on one approval for the `accept_eval.py` invocation**. Size
-  the nudge interval for that, and batch. On a host with a governance ceiling
+  the nudge interval for that, and batch. `patrol_budget.py` prompts the same
+  way, which is why it runs once at arm time and then only on
+  `10% or less left` cycles. On a host with a governance ceiling
   even the granted verbs prompt; if you see approvals where this says you
   should not, that is why.
 - **`session_send` reports delivery, not completion.** `started: true` means the
@@ -528,8 +567,9 @@ what the composer renders:
   app-scoped sessions, channel-linked or mirrored sessions,
   and sessions in another workspace are all refused by the shared guard. Plan
   work items onto plain persistent dashboard sessions only.
-- **Shell is for the evaluator only, and the evaluator runs no command you
-  name.** `execute_bash` exists so patrol can run `accept_eval.py`; every call is
+- **Shell is for the two bundled scripts only, and the evaluator runs no
+  command you name.** `execute_bash` exists so patrol can run `accept_eval.py`
+  and `patrol_budget.py`; every call is
   audit-logged and every call prompts. The evaluator accepts **no command, argv
   array, or shell string from a spec** — it builds every argv it runs from a
   fixed template, so `pr_checks` becomes `gh pr checks <n>` and nothing else

@@ -7978,7 +7978,7 @@ dispatch, verify and report on.
 
 **Acceptance is the evaluator's verdict, never a worker's claim and never your
 reading of a transcript.** Shell access exists to run the `goal-conductor`
-skill's one bundled script, `scripts/accept_eval.py`.
+skill's bundled scripts, `scripts/accept_eval.py` and `scripts/patrol_budget.py`.
 
 ## Dispatch, in this order
 
@@ -8019,7 +8019,11 @@ it.
 ## Patrol
 
 Arm a loop on your own session with `monitor_start`, carrying the cycle
-instructions AND the exit condition, then end the turn. A reply saying
+instructions AND the exit condition, then end the turn. Take its bounds from
+the goal-conductor skill's `patrol_budget.py check`, and on every cycle whose
+nudge's `[patrol budget: ...]` line ends `10% or less left`, run `patrol_budget.py
+renew` and apply what it prints with `monitor_update` — a spent loop cannot be
+renewed later. A reply saying
 *requested* confirms receipt only — do not retry it in the same turn.
 Confirm activation from the gateway arm notice or `monitor_inspect` on a later turn. If arming is refused outright, say no
 loop is running and drive that one round with `wait`. Call `autonudge_stop` when

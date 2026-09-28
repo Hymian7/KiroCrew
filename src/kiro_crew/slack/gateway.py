@@ -68,6 +68,7 @@ from kiro_crew.autonudge import enabled as autonudge_enabled
 from kiro_crew.autonudge import (
     is_channel_key,
     is_structured_monitor_loop,
+    nudge_cycle_header,
     runtime_budget_exceeded,
     terminal_notification_delivery_matches,
 )
@@ -6823,7 +6824,7 @@ class GatewayOrchestrator:
             _fired_sentinel = loop.stop_sentinel_path
             _fired_generation = loop.config_generation
             msg_body = await compose_nudge_body(_fired_message, _fired_sentinel, loop.slot_key)
-            tagged = f"[auto-nudge cycle {loop.cycle_count + 1}]\n{msg_body}"
+            tagged = f"{nudge_cycle_header(loop)}\n{msg_body}"
         else:
             tagged = wake_message
             _fired_generation = loop.config_generation
@@ -7202,7 +7203,7 @@ class GatewayOrchestrator:
             msg_body = await compose_nudge_body(
                 loop.message, loop.stop_sentinel_path, loop.slot_key
             )
-            tagged = f"[auto-nudge cycle {loop.cycle_count + 1}]\n{msg_body}"
+            tagged = f"{nudge_cycle_header(loop)}\n{msg_body}"
         else:
             tagged = wake_message
 
@@ -7575,7 +7576,7 @@ class GatewayOrchestrator:
             _fired_sentinel = loop.stop_sentinel_path
             _fired_generation = loop.config_generation
             msg = await compose_nudge_body(_fired_message, _fired_sentinel, loop.slot_key)
-            tagged = f"[auto-nudge cycle {loop.cycle_count + 1}]\n{msg}"
+            tagged = f"{nudge_cycle_header(loop)}\n{msg}"
         else:
             tagged = wake_message
         # ONE STRING, TWO CONSUMERS, and only an opt-in ``banner`` splits them.

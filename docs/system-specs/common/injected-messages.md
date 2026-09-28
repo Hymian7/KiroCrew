@@ -374,10 +374,16 @@ next turn into the same slot:
 
 ```
 [auto-nudge cycle <N>]
+[patrol budget: cycle <N>/<max_cycles>, <left>s/<max_runtime_secs>s runtime left]
 <nudge message>
 ```
 
 - `N` is `cycle_count + 1`. Only DELIVERED nudges count toward `max_cycles`.
+- The `[patrol budget: ...]` line appears only on a loop with a cycle or runtime
+  cap, and names only the caps it has; an uncapped loop's tag is unchanged. It
+  ends `; 10% or less left` once either budget is at or under 10% of its cap. It states a
+  fact and asks for nothing; the goal-conductor skill is what tells its agent to
+  renew on those cycles (`nudge_cycle_header`).
 - `{{STOP_FILE}}` in the configured message is substituted with the resolved stop
   sentinel path before the tag is prepended.
 - The slot entry uses role `nudge` with a structured `nudge` meta block (`cycle`,

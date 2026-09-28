@@ -1238,6 +1238,72 @@ def runtime_budget_exceeded(loop: "NudgeLoop", now: float | None = None) -> bool
     return (now if now is not None else time.time()) - loop.created_ts >= loop.max_runtime_secs
 
 
+#: Share of a loop's cycle or runtime cap at or under which the nudge header
+#: says ``10% or less left``. Mirrors ``RENEW_THRESHOLD`` in goal-conductor's
+#: ``patrol_budget.py``, which re-checks it before it renews.
+NUDGE_RENEW_DUE_SHARE = 0.10
+
+
+def _positive_number(value: object) -> float:
+    """``value`` as a finite positive float, else 0.
+
+    ``inf`` would pass ``> 0`` and then make ``int()`` raise, and an int too big
+    for a float makes the float arithmetic raise, so both are read as "no cap".
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    try:
+        number = float(value)
+    except OverflowError:
+        return 0
+    return number if math.isfinite(number) and number > 0 else 0
+
+
+def nudge_cycle_header(loop: "NudgeLoop", now: float | None = None) -> str:
+    """The ``[auto-nudge cycle N]`` tag, plus a budget line when the loop has a cap.
+
+    A patrol that cannot see its own budget cannot renew it in time: once the
+    cap is spent the loop deactivates and the agent never gets another turn in
+    which to call ``monitor_update``. So every capped cycle states what is left::
+
+        [auto-nudge cycle 229]
+        [patrol budget: cycle 229/240, 7560s/86400s runtime left; 10% or less left]
+
+    ``10% or less left`` appears once either budget is at or under
+    ``NUDGE_RENEW_DUE_SHARE`` of its cap. It is a fact, not an instruction:
+    every capped loop gets it, and only an agent whose own instructions say so
+    acts on it (goal-conductor renews on those cycles).
+
+    The first line is unchanged, so every reader of the tag still matches. An
+    uncapped loop gets the first line alone, byte-identical to before.
+    ``N`` is the cycle being delivered (``cycle_count + 1``); the runtime figure
+    is floored at 0 and omitted when there is no ``created_ts`` to measure from,
+    the same rule ``runtime_budget_exceeded`` applies.
+    """
+    cycle = loop.cycle_count + 1
+    tag = f"[auto-nudge cycle {cycle}]"
+    # Read the caps defensively, as the gateway reads ``banner``: ``_load`` builds
+    # a loop straight from parsed JSON, so a hand-edited store can carry any type
+    # here. A value that is not a number means "no budget line", never a crash --
+    # a raise would kill the fire, and the service re-arms an undelivered cycle.
+    max_cycles = _positive_number(getattr(loop, "max_cycles", 0))
+    max_runtime = _positive_number(getattr(loop, "max_runtime_secs", 0))
+    created_ts = _positive_number(getattr(loop, "created_ts", 0))
+    parts: list[str] = []
+    due = False
+    if max_cycles:
+        parts.append(f"cycle {cycle}/{int(max_cycles)}")
+        due = max(0, max_cycles - cycle) <= NUDGE_RENEW_DUE_SHARE * max_cycles
+    if max_runtime and created_ts:
+        elapsed = (now if now is not None else time.time()) - created_ts
+        left = max(0, int(max_runtime - elapsed))
+        parts.append(f"{left}s/{int(max_runtime)}s runtime left")
+        due = due or left <= NUDGE_RENEW_DUE_SHARE * max_runtime
+    if not parts:
+        return tag
+    return f"{tag}\n[patrol budget: {', '.join(parts)}{'; 10% or less left' if due else ''}]"
+
+
 @contextmanager
 def _locked_file(path: Path, mode: str) -> Iterator[Any]:
     path.parent.mkdir(parents=True, exist_ok=True)
